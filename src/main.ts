@@ -1,3 +1,16 @@
+/*
+ * LocalGPT - 支持从AI Providers SDK获取Token消耗和性能数据
+ * 
+ * 本文件使用了AI Providers SDK的Token消耗和性能指标获取功能。
+ * 请确保您使用的SDK版本≥1.4.0，此版本中IAIProvidersService接口正式添加了getLastRequestMetrics方法。
+ * 
+ * getLastRequestMetrics方法参数说明：
+ * - providerId: string - 提供商ID，用于获取特定提供商的指标
+ * 
+ * 返回：
+ * - IUsageMetrics对象或null（如果没有记录任何请求）
+ */
+
 import {
 	Editor,
 	Menu,
@@ -35,8 +48,18 @@ import {
 	IAIProvidersService,
 	AICapability,
 	IAIProvidersExecuteParams,
+	ITokenUsage,
+	ReportUsageCallback,
+	IUsageMetrics,
 } from "@obsidian-ai-providers/sdk";
 import { preparePrompt } from "./utils";
+
+// 定义本地接口，与SDK中的对应
+interface ITokenConsumptionStats {
+    totalPromptTokens: number;
+    totalCompletionTokens: number;
+    totalTokens: number;
+}
 
 export default class LocalGPT extends Plugin {
 	settings: LocalGPTSettings; // 插件设置
@@ -48,6 +71,7 @@ export default class LocalGPT extends Plugin {
 	private animationFrameId: number | null = null; // 动画帧 ID
 	private totalProgressSteps: number = 0; // 总进度步数
 	private completedProgressSteps: number = 0; // 已完成的进度步数
+	private lastTokenStats: ITokenConsumptionStats | null = null; // 上一次的token统计，用于计算增量
 
 	editorSuggest?: ModelSuggestor; // 用于存储 "@" 模型建议器的实例
 	actionSuggest?: ActionSuggestor; // 用于存储 "::" 动作建议器的实例
@@ -263,7 +287,7 @@ export default class LocalGPT extends Plugin {
 		let modelDisplayName: string = ""; // 用于存储模型显示名称 (To store the model display name)
 
 		// 设置模型显示名称
-		if (provider) {
+				if (provider) {
 			modelDisplayName = `${provider.name}${
 				provider.model ? ` (${provider.model})` : ""
 			}`;
@@ -316,9 +340,97 @@ export default class LocalGPT extends Plugin {
 		const modelCapabilities = aiProviders.getModelCapabilities(provider);
 		console.log("模型能力:", modelCapabilities);
 
-		// 准备执行参数
+		// --- 性能指标变量初始化 (Performance Metrics Variable Initialization) ---
+		const requestStartTime = performance.now(); // 请求开始时间 (Request start time)
+		let firstChunkTime: number | null = null; // 首个数据块到达时间 (Time when the first chunk arrives)
+		let tokensUsed: string | number = "N/A"; // 使用的 Token 数量，默认为 N/A (Number of tokens used, defaults to N/A)
+		// --- End of Performance Metrics Variable Initialization ---
+		
+		// 定义token使用和性能指标变量
+		let tokenData: {
+			inputTokens: number | string;
+			outputTokens: number | string;
+			totalTokens: number | string;
+			generationSpeed?: number | string;
+			promptEvalDuration?: number | string;
+			evalDuration?: number | string;
+			loadDuration?: number | string;
+			firstTokenLatency?: number;
+		} = {
+			inputTokens: "?",
+			outputTokens: "?",
+			totalTokens: "?"
+		};
+		
+		// 创建一个监听函数，用于捕获模型返回的完整元数据
+		// 此函数使用SDK提供的getLastRequestMetrics方法获取最近一次请求的性能指标
+		// 注意：此方法需要SDK版本≥1.4.0才能正常工作
+		const monitorOllamaData = async () => {
+			// 如果是Ollama提供商，尝试获取性能指标
+			if (provider && provider.type === 'ollama') {
+				// 等待一小段时间，确保请求已经完成
+				await new Promise(resolve => setTimeout(resolve, 100));
+				
+				try {
+					// 检查getLastRequestMetrics方法是否存在
+					if (aiProviders && typeof aiProviders.getLastRequestMetrics === 'function') {
+						console.log("找到getLastRequestMetrics方法，SDK版本兼容");
+						
+						// 直接使用IAIProvidersService接口调用getLastRequestMetrics方法
+						// 参数：providerId - 提供商ID，用于获取特定提供商的指标
+						// 返回：IUsageMetrics对象或null（如果没有记录任何请求）
+						const metrics = aiProviders.getLastRequestMetrics(provider.id);
+						
+						if (metrics) {
+							console.log("从SDK获取性能数据:", metrics);
+							
+							// 提取token数据，使用可选链操作符处理可能的undefined
+							tokenData.inputTokens = metrics.usage?.promptTokens || 0;
+							tokenData.outputTokens = metrics.usage?.completionTokens || 0;
+							tokenData.totalTokens = metrics.usage?.totalTokens || 0;
+							
+							// 提取性能指标数据，处理可能的undefined值
+							if (metrics.promptEvalDurationMs !== undefined) {
+								tokenData.promptEvalDuration = metrics.promptEvalDurationMs || 0;
+							}
+							
+							if (metrics.evalDurationMs !== undefined) {
+								tokenData.evalDuration = metrics.evalDurationMs || 0;
+							}
+							
+							if (metrics.loadDurationMs !== undefined) {
+								tokenData.loadDuration = metrics.loadDurationMs || 0;
+							}
+							
+							if (metrics.firstTokenLatencyMs !== undefined) {
+								tokenData.firstTokenLatency = metrics.firstTokenLatencyMs;
+							}
+							
+							// 计算生成速率（tokens/秒）
+							if (metrics.usage?.completionTokens && metrics.durationMs) {
+								tokenData.generationSpeed = Math.round((metrics.usage.completionTokens * 1000) / metrics.durationMs);
+							}
+							
+							console.log("成功处理性能指标:", tokenData);
+						} else {
+							console.log("SDK未返回性能指标数据，将使用智能估算");
+							// SDK未返回数据，将在后续使用智能估算
+						}
+					} else {
+						console.log("getLastRequestMetrics方法不存在，AI Providers插件版本可能低于1.4.0");
+						// 打印aiProviders对象的可用方法，用于调试
+						console.log("AI Providers可用方法:", Object.getOwnPropertyNames(aiProviders));
+					}
+				} catch (e) {
+					console.error("获取性能指标时出错:", e);
+					// 出错时会在后续使用智能估算器
+				}
+			}
+		};
+		
+		// 获取handler并执行请求
 		const executeParams: IAIProvidersExecuteParams = {
-			provider, // 使用最终确定的 Provider (Use the finally determined provider)
+			provider,
 			prompt: preparePrompt(action.prompt, selectedText, context),
 			images: imagesInBase64,
 			systemPrompt: action.system ? preparePrompt(action.system, "", "") : undefined,
@@ -328,89 +440,55 @@ export default class LocalGPT extends Plugin {
 					CREATIVITY[this.settings.defaults.creativity].temperature,
 			},
 		};
-
-		// --- 性能指标变量初始化 (Performance Metrics Variable Initialization) ---
-		const requestStartTime = performance.now(); // 请求开始时间 (Request start time)
-		let firstChunkTime: number | null = null; // 首个数据块到达时间 (Time when the first chunk arrives)
-		let tokensUsed: string | number = "N/A"; // 使用的 Token 数量，默认为 N/A (Number of tokens used, defaults to N/A)
-		// --- End of Performance Metrics Variable Initialization ---
-
+		
+		// 获取原始handler
 		const chunkHandler = await aiProviders.execute(executeParams);
-
+		
+		// 使用onData方法监听数据流
 		chunkHandler.onData((chunk: string, accumulatedText: string) => {
 			// --- TTFT捕获 (TTFT Capture) ---
 			if (firstChunkTime === null) {
 				firstChunkTime = performance.now(); // 记录首个数据块到达时间 (Record time of first chunk arrival)
+				tokenData.firstTokenLatency = Math.round(firstChunkTime - requestStartTime);
+				console.log("记录首字延迟:", tokenData.firstTokenLatency, "ms");
 			}
 			// --- End of TTFT Capture ---
 			onUpdate(accumulatedText);
 		});
 
-		chunkHandler.onEnd((fullText: string, metadata?: any) => {
+		chunkHandler.onEnd(async (fullText: string) => {
+			// 执行监控函数获取Ollama数据
+			await monitorOllamaData();
+			
 			hideSpinner && hideSpinner();
 			this.app.workspace.updateOptions();
 
 			// --- 总耗时与性能指标计算 (Total Time and Performance Metrics Calculation) ---
 			const requestEndTime = performance.now(); // 请求结束时间 (Request end time)
 			const totalTime = Math.round(requestEndTime - requestStartTime); // 总耗时 (Total time)
-			const ttft = firstChunkTime
-				? Math.round(firstChunkTime - requestStartTime)
-				: "N/A"; // 首字延迟 (Time to first token)
 			
-			// 获取Token消费统计信息
-			const tokenStats = aiProviders.getTokenConsumptionStats();
+			// 首字延迟: 使用直接测量的时间
+			const ttft = tokenData.firstTokenLatency || 
+				(firstChunkTime ? Math.round(firstChunkTime - requestStartTime) : "N/A");
 			
-			// 尝试从 SDK 获取实际的 token 使用数据
-			const usage =
-				metadata?.usage ||
-				metadata?.tokens ||
-				metadata?.tokenUsage ||
-				// @ts-ignore - chunkHandler 可能包含 usage 信息
-				chunkHandler.usage ||
-				(chunkHandler as any).tokens ||
-				(chunkHandler as any).tokenUsage ||
-				null;
-			
-			// 如果有实际的 token 数据，使用它；否则使用全局统计
-			let inputTokens: number;
-			let outputTokens: number;
-			let totalTokens: number;
-			
-			if (usage && (usage.prompt_tokens || usage.promptTokens || usage.inputTokens)) {
-				// 使用实际的 token 数据
-				inputTokens = usage.prompt_tokens || usage.promptTokens || usage.inputTokens || 0;
-				outputTokens = usage.completion_tokens || usage.completionTokens || usage.outputTokens || 0;
-				totalTokens = usage.total_tokens || usage.totalTokens || (inputTokens + outputTokens);
-				
-				console.log("使用实际 token 数据:", { inputTokens, outputTokens, totalTokens });
-			} else if (tokenStats && tokenStats.totalTokensConsumed > 0) {
-				// 使用全局 token 统计
-				inputTokens = tokenStats.totalPromptTokens;
-				outputTokens = tokenStats.totalCompletionTokens;
-				totalTokens = tokenStats.totalTokensConsumed;
-				
-				console.log("使用全局 token 统计:", tokenStats);
-			} else {
-				// 使用智能估算
-				const cleanedFullText = removeThinkingTags(fullText).trim();
-				const estimatedUsage = this.estimateTokenUsage(
-					selectedText, 
-					cleanedFullText, 
-					action.system
+			// 检查实时数据是否可用，如果没有则使用智能估算
+			if (tokenData.totalTokens === "?") {
+				console.log("实时token数据不可用，使用智能估算");
+				const estimatedTokens = this.estimateTokenUsage(
+					preparePrompt(action.prompt, selectedText, context), 
+					fullText, 
+					action.system ? preparePrompt(action.system, "", "") : undefined
 				);
-				
-				inputTokens = estimatedUsage.inputTokens;
-				outputTokens = estimatedUsage.outputTokens;
-				totalTokens = estimatedUsage.totalTokens;
-				
-				console.log("使用智能估算 token 数据:", { inputTokens, outputTokens, totalTokens });
+				tokenData.inputTokens = estimatedTokens.inputTokens;
+				tokenData.outputTokens = estimatedTokens.outputTokens;
+				tokenData.totalTokens = estimatedTokens.totalTokens;
 			}
-
-			// 计算生成速度 (tokens/second)
-			const tokensPerSecond = tokenStats.generationSpeed || 
-				(totalTime > 0 ? Math.round((outputTokens * 1000) / totalTime) : 0);
-			// --- End of Total Time and Performance Metrics Calculation ---
-
+			
+			// 如果没有生成速度数据，计算一个
+			if (!tokenData.generationSpeed && typeof tokenData.outputTokens === 'number' && totalTime > 0) {
+				tokenData.generationSpeed = Math.round((tokenData.outputTokens * 1000) / totalTime);
+			}
+			
 			// 移除思考标签并整理文本 (Remove thinking tags and trim the text)
 			const cleanedFullText = removeThinkingTags(fullText).trim();
 
@@ -429,8 +507,25 @@ export default class LocalGPT extends Plugin {
 			} ${capabilityIcons} ${timeStr}]:\n${cleanedFullText}`;
 
 			// --- 格式化并附加性能指标 (Format and Append Performance Metrics) ---
-			// 使用新的智能估算性能指标格式
-			const performanceMetrics = `\n\n[Tokens: ${totalTokens} ↑${inputTokens} ↓${outputTokens} ${tokensPerSecond}tokens/s | 首字延迟: ${ttft} ms | 总耗时: ${totalTime} ms]:`;
+			let performanceMetrics = `\n\n[Tokens: ${tokenData.totalTokens} ↑${tokenData.inputTokens} ↓${tokenData.outputTokens} ${tokenData.generationSpeed || "?"}tokens/s | 首字延迟: ${ttft} ms | 总耗时: ${totalTime} ms`;
+			
+			// 如果是Ollama类型，添加Ollama特有的性能指标
+			if (provider?.type === 'ollama' && (tokenData.promptEvalDuration || tokenData.evalDuration || tokenData.loadDuration)) {
+				performanceMetrics += ` | `;
+				if (tokenData.promptEvalDuration) {
+					performanceMetrics += `提示词评估: ${tokenData.promptEvalDuration}ms | `;
+				}
+				if (tokenData.evalDuration) {
+					performanceMetrics += `生成耗时: ${tokenData.evalDuration}ms | `;
+				}
+				if (tokenData.loadDuration) {
+					performanceMetrics += `模型加载: ${tokenData.loadDuration}ms | `;
+				}
+				// 去除最后的分隔符
+				performanceMetrics = performanceMetrics.replace(/\|\s*$/, '');
+			}
+			
+			performanceMetrics += `]:`;
 			finalText += performanceMetrics; // 将性能指标附加到最终文本后 (Append performance metrics to the final text)
 			// --- End of Format and Append Performance Metrics ---
 
@@ -949,11 +1044,11 @@ export default class LocalGPT extends Plugin {
 	private estimateTokens(text: string, isInput: boolean = false): number {
 		if (!text) return 0;
 		
-		// 基于经验的估算规则：
+		// 基于经验的估算规则（改进中文处理）：
 		// - 英文：大约4个字符 = 1个token
-		// - 中文：大约1.5个字符 = 1个token
-		// - 代码：大约3个字符 = 1个token
-		// - Markdown 格式化文本：大约3.5个字符 = 1个token
+		// - 中文：每个字符约 0.7 个token
+		// - 代码：大约3.5个字符 = 1个token
+		// - Markdown 格式化文本：额外 10% 开销
 		
 		const chineseCharPattern = /[\u4e00-\u9fff]/g;
 		const codeBlockPattern = /```[\s\S]*?```/g;
@@ -973,16 +1068,19 @@ export default class LocalGPT extends Plugin {
 		const englishChars = textWithoutCode.length - chineseChars;
 		
 		// 计算不同类型文本的 token
-		const chineseTokens = Math.ceil(chineseChars * 0.67); // 1.5字符/token
+		const chineseTokens = Math.ceil(chineseChars * 0.7); // 改进的中文token估算
 		const englishTokens = Math.ceil(englishChars * 0.25); // 4字符/token
-		const codeTokens = Math.ceil(codeBlocks.length * 0.33); // 3字符/token
+		const codeTokens = Math.ceil((codeBlocks.length + inlineCode.length) * 0.285); // 3.5字符/token
 		const markdownTokens = Math.ceil(markdownChars * 0.1); // 格式化标记的额外开销
 		
-		const totalTokens = chineseTokens + englishTokens + codeTokens + markdownTokens;
+		// Ollama模型通常需要更多token，直接使用调整系数
+		const modelAdjustment = 1.2; // 适当增加估算值以更接近Ollama实际值
+		
+		const totalTokens = Math.ceil((chineseTokens + englishTokens + codeTokens + markdownTokens) * modelAdjustment);
 		
 		// 为输入文本添加系统提示的估算开销
 		if (isInput) {
-			return Math.max(totalTokens + 50, 10); // 最少10个token，包含系统提示开销
+			return Math.max(totalTokens + 60, 15); // 最少15个token，包含系统提示开销
 		}
 		
 		return Math.max(totalTokens, 1); // 最少1个token
