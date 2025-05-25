@@ -33,6 +33,8 @@ import {
 	waitForAI,
 	IAIProvider,
 	IAIProvidersService,
+	AICapability,
+	IAIProvidersExecuteParams,
 } from "@obsidian-ai-providers/sdk";
 import { preparePrompt } from "./utils";
 
@@ -270,9 +272,14 @@ export default class LocalGPT extends Plugin {
 		// 处理图像：如果存在图像，并且当前选择的 Provider 不支持视觉功能，则尝试切换到视觉兼容的 Provider
 		// (Handle images: if images are present and the currently selected provider does not support vision, try switching to a vision-compatible provider)
 		if (imagesInBase64.length) {
+			// 获取当前模型的能力
+			let modelCapabilities: AICapability[] = [];
+			if (provider) {
+				modelCapabilities = aiProviders.getModelCapabilities(provider);
+			}
+
 			// 如果有图片，并且当前选择的provider不支持vision，尝试切换到vision-compatible provider
-			// @ts-ignore
-			if (!provider || !provider.capabilities?.vision) {
+			if (!provider || !modelCapabilities.includes('vision')) {
 				const visionProvider = aiProviders.providers.find(
 					(p: IAIProvider) =>
 						p.id === this.settings.aiProviders.vision,
@@ -280,15 +287,15 @@ export default class LocalGPT extends Plugin {
 				if (visionProvider) {
 					provider = visionProvider;
 					new Notice(
-						`Switched to vision-capable model: ${provider.name} for image processing.`,
+						`已切换到支持视觉的模型: ${provider.name} 处理图像。`,
 					);
 				} else if (!provider) {
 					// If no provider was selected at all and vision is needed but not configured
 					new Notice(
-						"Vision provider not configured, but images are present.",
+						"未配置视觉模型，但请求中包含图像。",
 					);
 					throw new Error(
-						"Vision provider not configured for image processing.",
+						"未配置视觉模型进行图像处理。",
 					);
 				}
 				// If a provider was already selected but it's not vision capable,
@@ -300,10 +307,27 @@ export default class LocalGPT extends Plugin {
 
 		if (!provider) {
 			new Notice(
-				"No AI provider found. Please configure a provider in settings.",
+				"未找到AI提供商。请在设置中配置提供商。",
 			);
-			throw new Error("No AI provider found");
+			throw new Error("未找到AI提供商");
 		}
+
+		// 检测模型能力并显示
+		const modelCapabilities = aiProviders.getModelCapabilities(provider);
+		console.log("模型能力:", modelCapabilities);
+
+		// 准备执行参数
+		const executeParams: IAIProvidersExecuteParams = {
+			provider, // 使用最终确定的 Provider (Use the finally determined provider)
+			prompt: preparePrompt(action.prompt, selectedText, context),
+			images: imagesInBase64,
+			systemPrompt: action.system ? preparePrompt(action.system, "", "") : undefined,
+			options: {
+				temperature:
+					action.temperature ||
+					CREATIVITY[this.settings.defaults.creativity].temperature,
+			},
+		};
 
 		// --- 性能指标变量初始化 (Performance Metrics Variable Initialization) ---
 		const requestStartTime = performance.now(); // 请求开始时间 (Request start time)
@@ -311,17 +335,7 @@ export default class LocalGPT extends Plugin {
 		let tokensUsed: string | number = "N/A"; // 使用的 Token 数量，默认为 N/A (Number of tokens used, defaults to N/A)
 		// --- End of Performance Metrics Variable Initialization ---
 
-		const chunkHandler = await aiProviders.execute({
-			provider, // 使用最终确定的 Provider (Use the finally determined provider)
-			prompt: preparePrompt(action.prompt, selectedText, context),
-			images: imagesInBase64,
-			systemPrompt: action.system,
-			options: {
-				temperature:
-					action.temperature ||
-					CREATIVITY[this.settings.defaults.creativity].temperature,
-			},
-		});
+		const chunkHandler = await aiProviders.execute(executeParams);
 
 		chunkHandler.onData((chunk: string, accumulatedText: string) => {
 			// --- TTFT捕获 (TTFT Capture) ---
@@ -332,7 +346,7 @@ export default class LocalGPT extends Plugin {
 			onUpdate(accumulatedText);
 		});
 
-				chunkHandler.onEnd((fullText: string, metadata?: any) => {
+		chunkHandler.onEnd((fullText: string, metadata?: any) => {
 			hideSpinner && hideSpinner();
 			this.app.workspace.updateOptions();
 
@@ -342,6 +356,9 @@ export default class LocalGPT extends Plugin {
 			const ttft = firstChunkTime
 				? Math.round(firstChunkTime - requestStartTime)
 				: "N/A"; // 首字延迟 (Time to first token)
+			
+			// 获取Token消费统计信息
+			const tokenStats = aiProviders.getTokenConsumptionStats();
 			
 			// 尝试从 SDK 获取实际的 token 使用数据
 			const usage =
@@ -354,7 +371,7 @@ export default class LocalGPT extends Plugin {
 				(chunkHandler as any).tokenUsage ||
 				null;
 			
-			// 如果有实际的 token 数据，使用它；否则使用估算
+			// 如果有实际的 token 数据，使用它；否则使用全局统计
 			let inputTokens: number;
 			let outputTokens: number;
 			let totalTokens: number;
@@ -366,6 +383,13 @@ export default class LocalGPT extends Plugin {
 				totalTokens = usage.total_tokens || usage.totalTokens || (inputTokens + outputTokens);
 				
 				console.log("使用实际 token 数据:", { inputTokens, outputTokens, totalTokens });
+			} else if (tokenStats && tokenStats.totalTokensConsumed > 0) {
+				// 使用全局 token 统计
+				inputTokens = tokenStats.totalPromptTokens;
+				outputTokens = tokenStats.totalCompletionTokens;
+				totalTokens = tokenStats.totalTokensConsumed;
+				
+				console.log("使用全局 token 统计:", tokenStats);
 			} else {
 				// 使用智能估算
 				const cleanedFullText = removeThinkingTags(fullText).trim();
@@ -383,23 +407,26 @@ export default class LocalGPT extends Plugin {
 			}
 
 			// 计算生成速度 (tokens/second)
-			const tokensPerSecond = totalTime > 0 
-				? Math.round((outputTokens * 1000) / totalTime)
-				: 0;
+			const tokensPerSecond = tokenStats.generationSpeed || 
+				(totalTime > 0 ? Math.round((outputTokens * 1000) / totalTime) : 0);
 			// --- End of Total Time and Performance Metrics Calculation ---
 
 			// 移除思考标签并整理文本 (Remove thinking tags and trim the text)
 			const cleanedFullText = removeThinkingTags(fullText).trim();
 
-			// 构建最终输出文本，模型名称单独一行
+			// 构建最终输出文本，包括模型能力标签
 			const now = new Date();
 			const timeStr = now.toLocaleString("zh-CN", {
 				timeZone: "Asia/Shanghai",
 				hour12: false,
 			});
+			
+			// 生成模型能力图标
+			const capabilityIcons = this.getCapabilityIcons(modelCapabilities);
+			
 			let finalText = `[${
 				modelDisplayName || "AI"
-			} ${timeStr}]:\n${cleanedFullText}`;
+			} ${capabilityIcons} ${timeStr}]:\n${cleanedFullText}`;
 
 			// --- 格式化并附加性能指标 (Format and Append Performance Metrics) ---
 			// 使用新的智能估算性能指标格式
@@ -432,7 +459,7 @@ export default class LocalGPT extends Plugin {
 		chunkHandler.onError((error: Error) => {
 			console.log("abort handled");
 			if (!abortController.signal.aborted) {
-				new Notice(`Error while generating text: ${error.message}`);
+				new Notice(`生成文本时出错: ${error.message}`);
 			}
 			hideSpinner && hideSpinner();
 			this.app.workspace.updateOptions();
@@ -1053,6 +1080,23 @@ export default class LocalGPT extends Plugin {
 		}
 		
 		return false;
+	}
+
+	// 根据模型能力生成图标
+	private getCapabilityIcons(capabilities: AICapability[]): string {
+		const iconMap: Record<AICapability, string> = {
+			'dialogue': '💬',
+			'vision': '👁️',
+			'tool_use': '🔧',
+			'text_to_image': '🖼️',
+			'embedding': '🔍'
+		};
+		
+		if (!capabilities || capabilities.length === 0) {
+			return '';
+		}
+		
+		return capabilities.map(cap => iconMap[cap] || '').join(' ');
 	}
 }
 

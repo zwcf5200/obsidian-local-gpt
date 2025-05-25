@@ -39,7 +39,7 @@
 	},
 	"dependencies": {
 		"@langchain/core": "^0.3.37",
-		"@obsidian-ai-providers/sdk": "^1.1.1",
+		"@obsidian-ai-providers/sdk": "file:../obsidian-ai-providers/packages/sdk/obsidian-ai-providers-sdk-1.1.2.tgz",
 		"idb": "^8.0.0",
 		"langchain": "^0.3.15",
 		"pdfjs-dist": "4.6.82"

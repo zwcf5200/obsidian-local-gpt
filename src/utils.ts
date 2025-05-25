@@ -3,6 +3,7 @@ import {
 	CONTEXT_KEYWORD,
 	CONTEXT_CONDITION_START,
 	CONTEXT_CONDITION_END,
+	CURRENT_TIME_KEYWORD,
 } from "./defaultSettings";
 
 export function preparePrompt(
@@ -45,6 +46,22 @@ export function preparePrompt(
 				contextBlock +
 				prompt.substring(end + CONTEXT_CONDITION_END.length + 1);
 		}
+	}
+
+	if (prompt.includes(CURRENT_TIME_KEYWORD)) {
+		const now = new Date();
+		const formattedTime = now.toLocaleString("zh-CN", {
+			timeZone: "Asia/Shanghai",
+			hour12: false,
+			year: 'numeric',
+			month: '2-digit',
+			day: '2-digit',
+			hour: '2-digit',
+			minute: '2-digit',
+			second: '2-digit',
+			weekday: 'long'
+		});
+		prompt = prompt.replace(CURRENT_TIME_KEYWORD, formattedTime);
 	}
 
 	return prompt;
