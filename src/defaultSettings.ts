@@ -8,8 +8,8 @@ export const DEFAULT_SETTINGS: LocalGPTSettings = {
 	},
 	defaults: {
 		creativity: "low",
-		showModelInfo: false,
-		showPerformance: false,
+		showModelInfo: true,
+		showPerformance: true,
 	},
 	actions: [
 		{

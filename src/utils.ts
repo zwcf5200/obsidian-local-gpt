@@ -14,25 +14,29 @@ export function preparePrompt(
 	context: string,
 ) {
 	// 返回一个对象，包含处理后的提示词和控制标志
-	let showModelInfo = false; // 默认不显示模型信息
-	let showPerformance = false; // 默认不显示性能信息
+	let showModelInfo: boolean | undefined = undefined; // 默认为undefined
+	let showPerformance: boolean | undefined = undefined; // 默认为undefined
 	
 	// 处理模型信息显示控制
 	if (prompt.includes(SHOW_MODEL_INFO_KEYWORD)) {
-		// 提取关键字的值（true或false）
-		const modelInfoValue = prompt.includes(SHOW_MODEL_INFO_KEYWORD + "=true");
-		showModelInfo = modelInfoValue;
+		// 使用正则表达式精确匹配关键字及其值
+		const modelInfoRegex = new RegExp(SHOW_MODEL_INFO_KEYWORD + "=(true|false)", "g");
+		const modelInfoMatch = prompt.match(modelInfoRegex);
+		// 确保结果始终为布尔类型
+		showModelInfo = modelInfoMatch ? modelInfoMatch[0].endsWith("=true") : undefined;
 		// 从提示词中删除关键字
-		prompt = prompt.replace(new RegExp(SHOW_MODEL_INFO_KEYWORD + "=(?:true|false)", "g"), "");
+		prompt = prompt.replace(modelInfoRegex, "");
 	}
 	
 	// 处理性能信息显示控制
 	if (prompt.includes(SHOW_PERFORMANCE_KEYWORD)) {
-		// 提取关键字的值（true或false）
-		const perfValue = prompt.includes(SHOW_PERFORMANCE_KEYWORD + "=true");
-		showPerformance = perfValue;
+		// 使用正则表达式精确匹配关键字及其值
+		const perfRegex = new RegExp(SHOW_PERFORMANCE_KEYWORD + "=(true|false)", "g");
+		const perfMatch = prompt.match(perfRegex);
+		// 确保结果始终为布尔类型
+		showPerformance = perfMatch ? perfMatch[0].endsWith("=true") : undefined;
 		// 从提示词中删除关键字
-		prompt = prompt.replace(new RegExp(SHOW_PERFORMANCE_KEYWORD + "=(?:true|false)", "g"), "");
+		prompt = prompt.replace(perfRegex, "");
 	}
 
 	if (prompt.includes(SELECTION_KEYWORD)) {

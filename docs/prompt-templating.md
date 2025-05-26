@@ -200,8 +200,31 @@ Some example context about the selected text from some meaningful document.
 # 指令
 对选中的文本进行处理。
 ```
+### Caveats
 
-## 时间信息 - {{=CURRENT_TIME=}}
+Remember that both the selection and context will be added to the end of the prompt by default if you not specify custom places for them.
+```
+# Task
+Some task.
+
+# Instructions
+Do something with the selected text.
+```
+Translates to:
+```
+# Task
+Some task.
+
+# Instructions
+Do something with the selected text.
+
+Selected text with [[Some meaningful document]].
+
+Context:
+Some example context about the selected text from some meaningful document.
+```
+
+# 时间信息 - {{=CURRENT_TIME=}}
 使用 `{{=CURRENT_TIME=}}` 在提示词中插入当前时间：
 
 ```
@@ -224,6 +247,7 @@ Some example context about the selected text from some meaningful document.
 ```
 
 当设置为false时，输出中不会包含模型名称和时间戳，只显示AI生成的内容。
+默认值取决于全局设置中的"显示模型信息"选项。
 
 ### 控制性能数据显示 - {{=SHOW_PERFORMANCE=}}
 使用 `{{=SHOW_PERFORMANCE=}}` 控制是否在输出中显示Token使用量和响应时间等性能指标：
@@ -234,9 +258,20 @@ Some example context about the selected text from some meaningful document.
 ```
 
 当设置为false时，输出中不会包含Token使用量、生成速度和响应时间等性能指标。
+默认值取决于全局设置中的"显示性能数据"选项。
 
 ### 同时控制两种信息
 可以同时控制两种信息的显示：
+
+```
+{{=SHOW_MODEL_INFO=}}=false
+{{=SHOW_PERFORMANCE=}}=false
+写一篇关于AI的短文：
+```
+
+这样生成的内容将不包含任何元数据，只显示AI生成的纯文本内容。
+
+如果想要同时显示两种信息，可以设置为true：
 
 ```
 {{=SHOW_MODEL_INFO=}}=true
@@ -244,7 +279,7 @@ Some example context about the selected text from some meaningful document.
 写一篇关于AI的短文：
 ```
 
-这样生成的内容将不包含任何元数据，只显示AI生成的纯文本内容。
+这样生成的内容将同时包含模型信息和性能数据。
 
 ## 优先级规则
 1. 如果在系统提示词(System prompt)中设置了控制参数，优先使用系统提示词中的设置

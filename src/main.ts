@@ -443,19 +443,19 @@ export default class LocalGPT extends Plugin {
 		
 		// 提取用户在提示词中设置的显示控制参数
 		const promptOptions = preparePrompt(action.prompt, "", "");
-		const systemOptions = action.system ? preparePrompt(action.system, "", "") : { showModelInfo: true, showPerformance: true };
+		const systemOptions = action.system ? preparePrompt(action.system, "", "") : { showModelInfo: undefined, showPerformance: undefined };
 		
 		// 合并系统提示和用户提示中的控制参数
 		// 如果系统提示中明确指定了，则使用系统提示的设置，否则使用用户提示的设置
 		// 如果两者都没有明确指定，则使用全局默认设置
 		const showModelInfo = 
-			'showModelInfo' in systemOptions ? systemOptions.showModelInfo : 
-			'showModelInfo' in promptOptions ? promptOptions.showModelInfo : 
+			systemOptions.showModelInfo !== undefined ? systemOptions.showModelInfo : 
+			promptOptions.showModelInfo !== undefined ? promptOptions.showModelInfo : 
 			this.settings.defaults.showModelInfo;
 			
 		const showPerformance = 
-			'showPerformance' in systemOptions ? systemOptions.showPerformance : 
-			'showPerformance' in promptOptions ? promptOptions.showPerformance : 
+			systemOptions.showPerformance !== undefined ? systemOptions.showPerformance : 
+			promptOptions.showPerformance !== undefined ? promptOptions.showPerformance : 
 			this.settings.defaults.showPerformance;
 		
 		// 获取原始handler
@@ -521,24 +521,24 @@ export default class LocalGPT extends Plugin {
 			
 			// 根据控制参数决定是否显示模型信息
 			let finalText = showModelInfo 
-				? `[${modelDisplayName || "AI"} ${capabilityIcons} ${timeStr}]:\n${cleanedFullText}`
+				? `[${modelDisplayName || "AI"} ${capabilityIcons} ${timeStr}]:\n---\n${cleanedFullText}`
 				: cleanedFullText;
 
 			// --- 格式化并附加性能指标 (Format and Append Performance Metrics) ---
 			if (showPerformance) {
-				let performanceMetrics = `\n\n[Tokens: ${tokenData.totalTokens} ↑${tokenData.inputTokens} ↓${tokenData.outputTokens} ${tokenData.generationSpeed || "?"}tokens/s | 首字延迟: ${ttft} ms | 总耗时: ${totalTime} ms`;
+				let performanceMetrics = `\n\n---\n[Toks: ${tokenData.totalTokens} ↑${tokenData.inputTokens} ↓${tokenData.outputTokens} ${tokenData.generationSpeed || "?"}toks/s | 首字: ${ttft}ms | 总耗时: ${totalTime}ms`;
 				
 				// 如果是Ollama类型，添加Ollama特有的性能指标
 				if (provider?.type === 'ollama' && (tokenData.promptEvalDuration || tokenData.evalDuration || tokenData.loadDuration)) {
 					performanceMetrics += ` | `;
 					if (tokenData.promptEvalDuration) {
-						performanceMetrics += `提示词评估: ${tokenData.promptEvalDuration}ms | `;
+						performanceMetrics += `提示词: ${tokenData.promptEvalDuration}ms | `;
 					}
 					if (tokenData.evalDuration) {
-						performanceMetrics += `生成耗时: ${tokenData.evalDuration}ms | `;
+						performanceMetrics += `生成: ${tokenData.evalDuration}ms | `;
 					}
 					if (tokenData.loadDuration) {
-						performanceMetrics += `模型加载: ${tokenData.loadDuration}ms | `;
+						performanceMetrics += `加载: ${tokenData.loadDuration}ms | `;
 					}
 					// 去除最后的分隔符
 					performanceMetrics = performanceMetrics.replace(/\|\s*$/, '');

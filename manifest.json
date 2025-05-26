@@ -4,7 +4,7 @@
 	"version": "2.1.0",
 	"minAppVersion": "0.15.0",
 	"description": "Local GPT assistance for maximum privacy and offline access",
-	"author": "Pavel Frankov",
+	"author": "Pavel Frankov & zwcf5200",
 	"authorUrl": "https://github.com/pfrankov",
 	"isDesktopOnly": false
 }
