@@ -37,6 +37,12 @@ export interface LocalGPTSettings {
 		showModelInfo: boolean;
 		showPerformance: boolean;
 	};
+	tags: {
+		cacheEnabled: boolean;   // 是否启用标签缓存
+		lastCacheUpdate: number; // 上次缓存更新时间戳
+		cacheUpdateInterval: number; // 缓存更新间隔（毫秒）
+		excludeFolders: string[]; // 排除的文件夹路径
+	};
 	actions: LocalGPTAction[];
 	_version: number;
 }
@@ -66,4 +72,9 @@ export interface AIProvider {
 		updateProgress: (progress: number) => void,
 	): Promise<number[][]>;
 	process(arg: AIProviderProcessingOptions): Promise<string>;
+}
+
+// 标签统计信息接口
+export interface TagStats {
+	[tagName: string]: number; // 标签名称 -> 引用次数
 }

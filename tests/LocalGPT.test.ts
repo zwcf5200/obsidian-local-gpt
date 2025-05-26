@@ -44,7 +44,7 @@ jest.mock('../src/main', () => {
         this.reload();
       });
       processText = jest.fn().mockImplementation((text, selectedText) => {
-        return `\n${text.replace(selectedText, '').trim()}\n`;
+        return `\n${text.trim()}\n`;
       });
     },
   };
@@ -71,6 +71,6 @@ describe('LocalGPT', () => {
 
   test('processText', () => {
     const result = localGPT.processText('Hello {{SELECTION}} world', '{{SELECTION}}');
-    expect(result).toBe('\nHello  world\n');
+    expect(result).toBe('\nHello {{SELECTION}} world\n');
   });
 });

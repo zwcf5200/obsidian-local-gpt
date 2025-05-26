@@ -53,6 +53,10 @@ import {
 	IUsageMetrics,
 } from "@obsidian-ai-providers/sdk";
 import { preparePrompt } from "./utils";
+import {
+	getAllTagStats,
+	clearTagCache,
+} from "./tagManager";
 
 // 定义本地接口，与SDK中的对应
 interface ITokenConsumptionStats {
@@ -127,10 +131,8 @@ export default class LocalGPT extends Plugin {
 		// 移除 <think>...</think> 标签及其内容
 		const cleanText = removeThinkingTags(text).trim();
 
-		// 返回格式化后的文本，去除原始选中文本
-		return ["\n", cleanText.replace(selectedText, "").trim(), "\n"].join(
-			"",
-		);
+		// 返回格式化后的文本，不再删除原始选中文本
+		return ["\n", cleanText, "\n"].join("");
 	}
 
 	// 添加命令面板命令
@@ -559,10 +561,10 @@ export default class LocalGPT extends Plugin {
 			} else {
 				// 否则，在选中文本后插入 (Otherwise, insert after the selected text)
 				const isLastLine = editor.lastLine() === cursorPositionTo.line;
-				// processText 进一步处理文本，例如移除原始选中文本部分 (processText further processes the text, e.g., removing the original selected text part)
-				const textToInsert = this.processText(finalText, selectedText);
+				// 获取经过processText处理的格式化文本
+				const formattedText = this.processText(finalText, selectedText);
 				editor.replaceRange(
-					isLastLine ? "\n" + textToInsert : textToInsert,
+					isLastLine ? "\n" + formattedText : formattedText,
 					{
 						ch: 0,
 						line: cursorPositionTo.line + 1,
@@ -1227,6 +1229,21 @@ export default class LocalGPT extends Plugin {
 		}
 		
 		return capabilities.map(cap => iconMap[cap] || '').join(' ');
+	}
+
+	// 刷新标签缓存
+	async refreshTagCache(forceRefresh: boolean = true) {
+		if (this.settings.tags.cacheEnabled) {
+			await getAllTagStats(
+				this.app,
+				this.settings.tags.excludeFolders,
+				forceRefresh
+			);
+			this.settings.tags.lastCacheUpdate = Date.now();
+			await this.saveSettings();
+		} else {
+			clearTagCache();
+		}
 	}
 }
 

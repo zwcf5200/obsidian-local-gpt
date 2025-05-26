@@ -6,7 +6,11 @@ import {
 	CURRENT_TIME_KEYWORD,
 	SHOW_MODEL_INFO_KEYWORD,
 	SHOW_PERFORMANCE_KEYWORD,
+	ALL_TAGS_KEYWORD,
+	CURRENT_TAGS_KEYWORD,
 } from "./defaultSettings";
+import { App, TFile } from "obsidian";
+import { generateTagTemplateVariable, getFileTagsArray } from "./tagManager";
 
 export function preparePrompt(
 	prompt: string = "",
@@ -96,5 +100,52 @@ export function preparePrompt(
 		prompt: prompt.trim(),
 		showModelInfo,
 		showPerformance
+	};
+}
+
+export async function preparePromptWithTags(
+	prompt: string = "",
+	selectedText: string,
+	context: string,
+	app: App,
+	currentFile: TFile | null = null,
+	excludeFolders: string[] = []
+) {
+	// 首先使用基本的preparePrompt处理常规变量
+	const baseResult = preparePrompt(prompt, selectedText, context);
+	let processedPrompt = baseResult.prompt;
+	
+	// 处理标签相关的变量
+	// 所有标签统计
+	if (processedPrompt.includes(ALL_TAGS_KEYWORD)) {
+		const allTagsVar = await generateTagTemplateVariable(app, excludeFolders);
+		processedPrompt = processedPrompt.replace(
+			new RegExp(ALL_TAGS_KEYWORD, "g"),
+			allTagsVar
+		);
+	}
+	
+	// 当前文件的标签
+	if (processedPrompt.includes(CURRENT_TAGS_KEYWORD) && currentFile) {
+		const currentTags = getFileTagsArray(app, currentFile);
+		const currentTagsVar = currentTags.length > 0 
+			? `当前标签: ${currentTags.join(", ")}` 
+			: "当前文档没有标签";
+		
+		processedPrompt = processedPrompt.replace(
+			new RegExp(CURRENT_TAGS_KEYWORD, "g"),
+			currentTagsVar
+		);
+	} else if (processedPrompt.includes(CURRENT_TAGS_KEYWORD)) {
+		// 没有当前文件时
+		processedPrompt = processedPrompt.replace(
+			new RegExp(CURRENT_TAGS_KEYWORD, "g"),
+			"当前文档没有标签"
+		);
+	}
+	
+	return {
+		...baseResult,
+		prompt: processedPrompt
 	};
 }

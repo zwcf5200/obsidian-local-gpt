@@ -3,6 +3,7 @@ import { DEFAULT_SETTINGS } from "defaultSettings";
 import LocalGPT from "./main";
 import { LocalGPTAction } from "./interfaces";
 import { waitForAI } from "@obsidian-ai-providers/sdk";
+import { clearTagCache } from "./tagManager";
 
 const SEPARATOR = "✂️";
 
@@ -151,6 +152,89 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 							await this.plugin.saveSettings();
 						});
 				});
+
+			// 添加标签管理设置部分
+			containerEl.createEl("div", { cls: "local-gpt-settings-separator" });
+			containerEl.createEl("h3", { text: "标签管理" });
+			
+			// 启用标签缓存
+			new Setting(containerEl)
+				.setName("启用标签缓存")
+				.setDesc("启用标签缓存可以提高模板变量渲染速度，但可能会占用额外内存")
+				.addToggle((toggle) => {
+					toggle
+						.setValue(this.plugin.settings.tags.cacheEnabled)
+						.onChange(async (value) => {
+							this.plugin.settings.tags.cacheEnabled = value;
+							if (!value) {
+								// 如果禁用缓存，清除现有缓存
+								clearTagCache();
+							}
+							await this.plugin.saveSettings();
+						});
+				});
+				
+			// 缓存更新间隔
+			new Setting(containerEl)
+				.setName("缓存更新间隔（分钟）")
+				.setDesc("设置标签缓存自动刷新的时间间隔")
+				.addSlider((slider) => {
+					slider
+						.setLimits(5, 240, 5)
+						.setValue(this.plugin.settings.tags.cacheUpdateInterval / 60000)
+						.setDynamicTooltip()
+						.onChange(async (value) => {
+							this.plugin.settings.tags.cacheUpdateInterval = value * 60000;
+							await this.plugin.saveSettings();
+						});
+				});
+			
+			// 排除的文件夹
+			new Setting(containerEl)
+				.setName("排除的文件夹")
+				.setDesc("不包含在标签统计中的文件夹路径，每行一个")
+				.addTextArea((textarea) => {
+					textarea
+						.setValue(this.plugin.settings.tags.excludeFolders.join("\n"))
+						.onChange(async (value) => {
+							// 分割文本为数组，过滤空行
+							const folders = value.split("\n").filter(line => line.trim() !== "");
+							this.plugin.settings.tags.excludeFolders = folders;
+							await this.plugin.saveSettings();
+						});
+					
+					// 设置文本区域样式
+					textarea.inputEl.rows = 4;
+					textarea.inputEl.cols = 50;
+				});
+			
+			// 手动刷新标签缓存按钮
+			new Setting(containerEl)
+				.setName("刷新标签缓存")
+				.setDesc("手动刷新标签缓存，获取最新的标签统计信息")
+				.addButton((button) => {
+					button
+						.setButtonText("刷新缓存")
+						.setCta()
+						.onClick(async () => {
+							button.setButtonText("正在刷新...");
+							button.setDisabled(true);
+							
+							try {
+								await this.plugin.refreshTagCache(true);
+								new Notice("标签缓存已刷新");
+							} catch (error) {
+								console.error("刷新标签缓存失败", error);
+								new Notice("刷新标签缓存失败: " + (error?.message || "未知错误"));
+							} finally {
+								button.setButtonText("刷新缓存");
+								button.setDisabled(false);
+							}
+						});
+				});
+				
+			containerEl.createEl("div", { cls: "local-gpt-settings-separator" });
+
 		} catch (error) {
 			console.error(error);
 		}
@@ -170,8 +254,6 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 			replace: "Replace: ",
 			model: "Model: ",
 		};
-
-		containerEl.createEl("div", { cls: "local-gpt-settings-separator" });
 
 		containerEl.createEl("h3", { text: "Actions" });
 
