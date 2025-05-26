@@ -312,6 +312,10 @@ export default class LocalGPT extends Plugin {
 				);
 				if (visionProvider) {
 					provider = visionProvider;
+					// 更新模型显示名称，确保显示正确的视觉模型名称
+					modelDisplayName = `${visionProvider.name}${
+						visionProvider.model ? ` (${visionProvider.model})` : ""
+					}`;
 					new Notice(
 						`已切换到支持视觉的模型: ${provider.name} 处理图像。`,
 					);
@@ -328,6 +332,18 @@ export default class LocalGPT extends Plugin {
 				// and no specific vision provider is set, we might proceed without vision
 				// or throw an error depending on desired behavior. Here, we'll let it proceed
 				// and the provider itself might error out if it can't handle images.
+			}
+		} else {
+			// 如果没有图片，确保使用主模型（而不是上次可能使用的视觉模型）
+			const mainProvider = aiProviders.providers.find(
+				(p: IAIProvider) => p.id === this.settings.aiProviders.main,
+			);
+			if (mainProvider) {
+				provider = mainProvider;
+				// 更新模型显示名称为主模型
+				modelDisplayName = `${mainProvider.name}${
+					mainProvider.model ? ` (${mainProvider.model})` : ""
+				}`;
 			}
 		}
 
