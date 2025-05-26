@@ -4,6 +4,8 @@ import {
 	CONTEXT_CONDITION_START,
 	CONTEXT_CONDITION_END,
 	CURRENT_TIME_KEYWORD,
+	SHOW_MODEL_INFO_KEYWORD,
+	SHOW_PERFORMANCE_KEYWORD,
 } from "./defaultSettings";
 
 export function preparePrompt(
@@ -11,6 +13,28 @@ export function preparePrompt(
 	selectedText: string,
 	context: string,
 ) {
+	// 返回一个对象，包含处理后的提示词和控制标志
+	let showModelInfo = false; // 默认不显示模型信息
+	let showPerformance = false; // 默认不显示性能信息
+	
+	// 处理模型信息显示控制
+	if (prompt.includes(SHOW_MODEL_INFO_KEYWORD)) {
+		// 提取关键字的值（true或false）
+		const modelInfoValue = prompt.includes(SHOW_MODEL_INFO_KEYWORD + "=true");
+		showModelInfo = modelInfoValue;
+		// 从提示词中删除关键字
+		prompt = prompt.replace(new RegExp(SHOW_MODEL_INFO_KEYWORD + "=(?:true|false)", "g"), "");
+	}
+	
+	// 处理性能信息显示控制
+	if (prompt.includes(SHOW_PERFORMANCE_KEYWORD)) {
+		// 提取关键字的值（true或false）
+		const perfValue = prompt.includes(SHOW_PERFORMANCE_KEYWORD + "=true");
+		showPerformance = perfValue;
+		// 从提示词中删除关键字
+		prompt = prompt.replace(new RegExp(SHOW_PERFORMANCE_KEYWORD + "=(?:true|false)", "g"), "");
+	}
+
 	if (prompt.includes(SELECTION_KEYWORD)) {
 		prompt = prompt.replace(SELECTION_KEYWORD, selectedText || "");
 	} else {
@@ -64,5 +88,9 @@ export function preparePrompt(
 		prompt = prompt.replace(CURRENT_TIME_KEYWORD, formattedTime);
 	}
 
-	return prompt;
+	return {
+		prompt: prompt.trim(),
+		showModelInfo,
+		showPerformance
+	};
 }

@@ -127,6 +127,30 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 							await this.display();
 						});
 				});
+
+			new Setting(containerEl)
+				.setName("显示模型信息")
+				.setDesc("控制是否在输出中默认显示模型名称和时间戳")
+				.addToggle((toggle) => {
+					toggle
+						.setValue(this.plugin.settings.defaults.showModelInfo)
+						.onChange(async (value) => {
+							this.plugin.settings.defaults.showModelInfo = value;
+							await this.plugin.saveSettings();
+						});
+				});
+
+			new Setting(containerEl)
+				.setName("显示性能数据")
+				.setDesc("控制是否在输出中默认显示Token数量和处理时间等性能数据")
+				.addToggle((toggle) => {
+					toggle
+						.setValue(this.plugin.settings.defaults.showPerformance)
+						.onChange(async (value) => {
+							this.plugin.settings.defaults.showPerformance = value;
+							await this.plugin.saveSettings();
+						});
+				});
 		} catch (error) {
 			console.error(error);
 		}

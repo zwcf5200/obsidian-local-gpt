@@ -34,6 +34,8 @@ export interface LocalGPTSettings {
 	};
 	defaults: {
 		creativity: string;
+		showModelInfo: boolean;
+		showPerformance: boolean;
 	};
 	actions: LocalGPTAction[];
 	_version: number;

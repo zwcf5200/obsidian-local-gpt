@@ -8,6 +8,8 @@ export const DEFAULT_SETTINGS: LocalGPTSettings = {
 	},
 	defaults: {
 		creativity: "low",
+		showModelInfo: false,
+		showPerformance: false,
 	},
 	actions: [
 		{
@@ -70,3 +72,5 @@ export const CONTEXT_KEYWORD = "{{=CONTEXT=}}";
 export const CONTEXT_CONDITION_START = "{{=CONTEXT_START=}}";
 export const CONTEXT_CONDITION_END = "{{=CONTEXT_END=}}";
 export const CURRENT_TIME_KEYWORD = "{{=CURRENT_TIME=}}";
+export const SHOW_MODEL_INFO_KEYWORD = "{{=SHOW_MODEL_INFO=}}";
+export const SHOW_PERFORMANCE_KEYWORD = "{{=SHOW_PERFORMANCE=}}";

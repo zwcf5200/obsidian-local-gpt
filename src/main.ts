@@ -287,7 +287,7 @@ export default class LocalGPT extends Plugin {
 		let modelDisplayName: string = ""; // 用于存储模型显示名称 (To store the model display name)
 
 		// 设置模型显示名称
-				if (provider) {
+		if (provider) {
 			modelDisplayName = `${provider.name}${
 				provider.model ? ` (${provider.model})` : ""
 			}`;
@@ -431,15 +431,32 @@ export default class LocalGPT extends Plugin {
 		// 获取handler并执行请求
 		const executeParams: IAIProvidersExecuteParams = {
 			provider,
-			prompt: preparePrompt(action.prompt, selectedText, context),
+			prompt: preparePrompt(action.prompt, selectedText, context).prompt,
 			images: imagesInBase64,
-			systemPrompt: action.system ? preparePrompt(action.system, "", "") : undefined,
+			systemPrompt: action.system ? preparePrompt(action.system, "", "").prompt : undefined,
 			options: {
 				temperature:
 					action.temperature ||
 					CREATIVITY[this.settings.defaults.creativity].temperature,
 			},
 		};
+		
+		// 提取用户在提示词中设置的显示控制参数
+		const promptOptions = preparePrompt(action.prompt, "", "");
+		const systemOptions = action.system ? preparePrompt(action.system, "", "") : { showModelInfo: true, showPerformance: true };
+		
+		// 合并系统提示和用户提示中的控制参数
+		// 如果系统提示中明确指定了，则使用系统提示的设置，否则使用用户提示的设置
+		// 如果两者都没有明确指定，则使用全局默认设置
+		const showModelInfo = 
+			'showModelInfo' in systemOptions ? systemOptions.showModelInfo : 
+			'showModelInfo' in promptOptions ? promptOptions.showModelInfo : 
+			this.settings.defaults.showModelInfo;
+			
+		const showPerformance = 
+			'showPerformance' in systemOptions ? systemOptions.showPerformance : 
+			'showPerformance' in promptOptions ? promptOptions.showPerformance : 
+			this.settings.defaults.showPerformance;
 		
 		// 获取原始handler
 		const chunkHandler = await aiProviders.execute(executeParams);
@@ -475,9 +492,9 @@ export default class LocalGPT extends Plugin {
 			if (tokenData.totalTokens === "?") {
 				console.log("实时token数据不可用，使用智能估算");
 				const estimatedTokens = this.estimateTokenUsage(
-					preparePrompt(action.prompt, selectedText, context), 
+					preparePrompt(action.prompt, selectedText, context).prompt, 
 					fullText, 
-					action.system ? preparePrompt(action.system, "", "") : undefined
+					action.system ? preparePrompt(action.system, "", "").prompt : undefined
 				);
 				tokenData.inputTokens = estimatedTokens.inputTokens;
 				tokenData.outputTokens = estimatedTokens.outputTokens;
@@ -502,31 +519,34 @@ export default class LocalGPT extends Plugin {
 			// 生成模型能力图标
 			const capabilityIcons = this.getCapabilityIcons(modelCapabilities);
 			
-			let finalText = `[${
-				modelDisplayName || "AI"
-			} ${capabilityIcons} ${timeStr}]:\n${cleanedFullText}`;
+			// 根据控制参数决定是否显示模型信息
+			let finalText = showModelInfo 
+				? `[${modelDisplayName || "AI"} ${capabilityIcons} ${timeStr}]:\n${cleanedFullText}`
+				: cleanedFullText;
 
 			// --- 格式化并附加性能指标 (Format and Append Performance Metrics) ---
-			let performanceMetrics = `\n\n[Tokens: ${tokenData.totalTokens} ↑${tokenData.inputTokens} ↓${tokenData.outputTokens} ${tokenData.generationSpeed || "?"}tokens/s | 首字延迟: ${ttft} ms | 总耗时: ${totalTime} ms`;
-			
-			// 如果是Ollama类型，添加Ollama特有的性能指标
-			if (provider?.type === 'ollama' && (tokenData.promptEvalDuration || tokenData.evalDuration || tokenData.loadDuration)) {
-				performanceMetrics += ` | `;
-				if (tokenData.promptEvalDuration) {
-					performanceMetrics += `提示词评估: ${tokenData.promptEvalDuration}ms | `;
+			if (showPerformance) {
+				let performanceMetrics = `\n\n[Tokens: ${tokenData.totalTokens} ↑${tokenData.inputTokens} ↓${tokenData.outputTokens} ${tokenData.generationSpeed || "?"}tokens/s | 首字延迟: ${ttft} ms | 总耗时: ${totalTime} ms`;
+				
+				// 如果是Ollama类型，添加Ollama特有的性能指标
+				if (provider?.type === 'ollama' && (tokenData.promptEvalDuration || tokenData.evalDuration || tokenData.loadDuration)) {
+					performanceMetrics += ` | `;
+					if (tokenData.promptEvalDuration) {
+						performanceMetrics += `提示词评估: ${tokenData.promptEvalDuration}ms | `;
+					}
+					if (tokenData.evalDuration) {
+						performanceMetrics += `生成耗时: ${tokenData.evalDuration}ms | `;
+					}
+					if (tokenData.loadDuration) {
+						performanceMetrics += `模型加载: ${tokenData.loadDuration}ms | `;
+					}
+					// 去除最后的分隔符
+					performanceMetrics = performanceMetrics.replace(/\|\s*$/, '');
 				}
-				if (tokenData.evalDuration) {
-					performanceMetrics += `生成耗时: ${tokenData.evalDuration}ms | `;
-				}
-				if (tokenData.loadDuration) {
-					performanceMetrics += `模型加载: ${tokenData.loadDuration}ms | `;
-				}
-				// 去除最后的分隔符
-				performanceMetrics = performanceMetrics.replace(/\|\s*$/, '');
+				
+				performanceMetrics += `]:`;
+				finalText += performanceMetrics;
 			}
-			
-			performanceMetrics += `]:`;
-			finalText += performanceMetrics; // 将性能指标附加到最终文本后 (Append performance metrics to the final text)
 			// --- End of Format and Append Performance Metrics ---
 
 			if (action.replace) {
@@ -892,6 +912,18 @@ export default class LocalGPT extends Plugin {
 				delete (loadedData as any).providers;
 
 				loadedData._version = 7;
+			}
+			
+			if (loadedData._version < 8) {
+				needToSave = true;
+				
+				// 如果defaults字段存在但没有新增的字段，添加默认值
+				if (loadedData.defaults) {
+					(loadedData.defaults as any).showModelInfo = true;
+					(loadedData.defaults as any).showPerformance = true;
+				}
+				
+				loadedData._version = 8;
 			}
 		}
 
