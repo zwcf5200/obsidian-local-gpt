@@ -433,9 +433,25 @@ export default class LocalGPT extends Plugin {
 		// 获取handler并执行请求
 		const executeParams: IAIProvidersExecuteParams = {
 			provider,
-			prompt: preparePrompt(action.prompt, selectedText, context).prompt,
+			prompt: (await preparePrompt(
+				action.prompt, 
+				selectedText, 
+				context, 
+				this.app, 
+				this.app.workspace.getActiveFile(),
+				this.settings.tags.excludeFolders
+			)).prompt,
 			images: imagesInBase64,
-			systemPrompt: action.system ? preparePrompt(action.system, "", "").prompt : undefined,
+			systemPrompt: action.system ? 
+				(await preparePrompt(
+					action.system, 
+					"", 
+					"", 
+					this.app,
+					this.app.workspace.getActiveFile(),
+					this.settings.tags.excludeFolders
+				)).prompt : 
+				undefined,
 			options: {
 				temperature:
 					action.temperature ||
@@ -444,8 +460,24 @@ export default class LocalGPT extends Plugin {
 		};
 		
 		// 提取用户在提示词中设置的显示控制参数
-		const promptOptions = preparePrompt(action.prompt, "", "");
-		const systemOptions = action.system ? preparePrompt(action.system, "", "") : { showModelInfo: undefined, showPerformance: undefined };
+		const promptOptions = await preparePrompt(
+			action.prompt, 
+			"", 
+			"", 
+			this.app,
+			this.app.workspace.getActiveFile(),
+			this.settings.tags.excludeFolders
+		);
+		const systemOptions = action.system ? 
+			await preparePrompt(
+				action.system, 
+				"", 
+				"", 
+				this.app,
+				this.app.workspace.getActiveFile(),
+				this.settings.tags.excludeFolders
+			) : 
+			{ showModelInfo: undefined, showPerformance: undefined };
 		
 		// 合并系统提示和用户提示中的控制参数
 		// 如果系统提示中明确指定了，则使用系统提示的设置，否则使用用户提示的设置
@@ -494,9 +526,25 @@ export default class LocalGPT extends Plugin {
 			if (tokenData.totalTokens === "?") {
 				console.log("实时token数据不可用，使用智能估算");
 				const estimatedTokens = this.estimateTokenUsage(
-					preparePrompt(action.prompt, selectedText, context).prompt, 
+					(await preparePrompt(
+						action.prompt, 
+						selectedText, 
+						context, 
+						this.app, 
+						this.app.workspace.getActiveFile(),
+						this.settings.tags.excludeFolders
+					)).prompt, 
 					fullText, 
-					action.system ? preparePrompt(action.system, "", "").prompt : undefined
+					action.system ? 
+						(await preparePrompt(
+							action.system, 
+							"", 
+							"", 
+							this.app,
+							this.app.workspace.getActiveFile(),
+							this.settings.tags.excludeFolders
+						)).prompt : 
+						undefined
 				);
 				tokenData.inputTokens = estimatedTokens.inputTokens;
 				tokenData.outputTokens = estimatedTokens.outputTokens;
