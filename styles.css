@@ -4,6 +4,92 @@
 	height: 1em;
 }
 
+/* 设置页面美化样式 */
+.local-gpt-settings-header {
+	margin-top: 24px;
+	margin-bottom: 12px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	padding-bottom: 6px;
+	color: var(--text-accent);
+	font-size: 1.2em;
+	font-weight: 600;
+}
+
+.local-gpt-settings-section {
+	background-color: var(--background-secondary-alt);
+	border-radius: 8px;
+	padding: 16px;
+	margin-bottom: 16px;
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+.local-gpt-settings-section .setting-item {
+	border-top: none;
+	padding-top: 12px;
+	padding-bottom: 12px;
+}
+
+.local-gpt-settings-section .setting-item:not(:last-child) {
+	border-bottom: 1px solid var(--background-modifier-border-hover);
+}
+
+.local-gpt-action-item {
+	background-color: var(--background-primary);
+	border-radius: 6px;
+	margin-bottom: 8px;
+	transition: background-color 0.2s ease;
+	border: 1px solid var(--background-modifier-border);
+}
+
+.local-gpt-action-item:hover {
+	background-color: var(--background-primary-alt);
+}
+
+.local-gpt-action-item .setting-item-control {
+	flex-wrap: nowrap;
+}
+
+.local-gpt-action-item-selected {
+	border-left: 4px solid var(--interactive-accent);
+}
+
+.local-gpt-button {
+	background-color: var(--interactive-normal);
+	color: var(--text-normal);
+	border-radius: 4px;
+	padding: 4px 10px;
+	font-size: 14px;
+	font-weight: 500;
+	transition: all 0.2s ease;
+}
+
+.local-gpt-button:hover {
+	background-color: var(--interactive-hover);
+}
+
+.local-gpt-button-primary {
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.local-gpt-button-primary:hover {
+	background-color: var(--interactive-accent-hover);
+}
+
+.local-gpt-button-danger {
+	background-color: var(--text-error);
+	color: white;
+}
+
+.local-gpt-button-danger:hover {
+	background-color: var(--text-error-hover);
+}
+
+.ai-providers-select .dropdown {
+	min-width: 200px;
+}
+
 .local-gpt-content {
 	color: var(--text-faint);
 	display: block;

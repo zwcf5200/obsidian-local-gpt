@@ -36,6 +36,7 @@ export interface LocalGPTSettings {
 		creativity: string;
 		showModelInfo: boolean;
 		showPerformance: boolean;
+		defaultAction: string | null; // 默认动作ID
 	};
 	tags: {
 		cacheEnabled: boolean;   // 是否启用标签缓存

@@ -87,7 +87,7 @@ export default class LocalGPT extends Plugin {
 			await this.loadSettings(); // 加载设置
 			// 添加设置页面标签
 			this.addSettingTab(new LocalGPTSettingTab(this.app, this));
-			this.reload(); // 重新加载插件配置
+			this.reload(); // 设置插件配置
 
 			// 等待工作区准备就绪后初始化
 			this.app.workspace.onLayoutReady(async () => {
@@ -140,7 +140,7 @@ export default class LocalGPT extends Plugin {
 		// 添加右键上下文菜单命令
 		this.addCommand({
 			id: "context-menu",
-			name: "Show context menu",
+			name: "显示操作菜单",
 			editorCallback: (editor: Editor) => {
 				// @ts-expect-error, not typed
 				const editorView = editor.cm;
@@ -171,6 +171,34 @@ export default class LocalGPT extends Plugin {
 					y: toRect.top + (editorView.defaultLineHeight || 0),
 				});
 			},
+		});
+		
+		// 添加执行默认动作的命令
+		this.addCommand({
+			id: "run-default-action",
+			name: "执行默认动作",
+			editorCallback: (editor: Editor) => {
+				// 获取默认动作名称
+				const defaultActionName = this.settings.defaults.defaultAction;
+				
+				if (!defaultActionName) {
+					new Notice("未设置默认动作，请在设置中配置");
+					return;
+				}
+				
+				// 查找默认动作
+				const defaultAction = this.settings.actions.find(
+					action => action.name === defaultActionName
+				);
+				
+				if (!defaultAction) {
+					new Notice(`未找到名为"${defaultActionName}"的动作`);
+					return;
+				}
+				
+				// 执行默认动作
+				this.runAction(defaultAction, editor);
+			}
 		});
 
 		// 为每个动作添加快速访问命令
@@ -214,12 +242,20 @@ export default class LocalGPT extends Plugin {
 		};
 
 		// 提取并处理文本中的图片链接
-		const regexp = /!\[\[(.+?\.(?:png|jpe?g))]]/gi;
+		// 修改正则表达式，使其能够同时匹配![[文件名.png]]和[[文件名.png]]格式
+		const regexp = /(!?\[\[(.+?\.(?:png|jpe?g))])/gi;
+		
+		// 提取所有图片文件名
 		const fileNames = Array.from(
 			selectedText.matchAll(regexp),
-			(match) => match[1],
+			(match) => {
+				// 返回匹配的文件名部分
+				const fileName = match[2];
+				return fileName;
+			}
 		);
 
+		// 从文本中移除图片链接
 		selectedText = selectedText.replace(regexp, "");
 
 		// 将图片转换为 Base64 编码
@@ -1517,41 +1553,11 @@ class ModelSuggestor extends EditorSuggest<IAIProvider> {
 
 	// 渲染每个建议项 (Render each suggestion item)
 	renderSuggestion(suggestion: IAIProvider, el: HTMLElement): void {
-		// 获取真实模型能力
-		let modelCapabilities: AICapability[] = [];
-		let capabilityIcons = ""; // 所有能力的图标
+		// 使用智能视觉模型判断器确定模型类型
+		const isVisionModel = this.plugin.isVisionCapableModel(suggestion);
 		
-		if (this.aiProvidersService) {
-			try {
-				// 与runAction方法一致，使用aiProvidersService.getModelCapabilities获取能力
-				modelCapabilities = this.aiProvidersService.getModelCapabilities(suggestion);
-				
-				// 使用与getCapabilityIcons相同的逻辑处理多个能力图标
-				if (modelCapabilities && modelCapabilities.length > 0) {
-					const iconMap: Record<AICapability, string> = {
-						'dialogue': '💬',
-						'vision': '👁️',
-						'tool_use': '🔧',
-						'text_to_image': '🖼️',
-						'embedding': '🔍'
-					};
-					capabilityIcons = modelCapabilities.map(cap => iconMap[cap] || '').join(' ');
-				}
-			} catch (e) {
-				// 如果获取能力失败，回退到旧方法
-				const isVisionModel = this.plugin.isVisionCapableModel(suggestion);
-				capabilityIcons = isVisionModel ? "👁️" : "💬";
-			}
-		} else {
-			// 服务不可用时回退到旧方法
-			const isVisionModel = this.plugin.isVisionCapableModel(suggestion);
-			capabilityIcons = isVisionModel ? "👁️" : "💬";
-		}
-		
-		// 如果没有获取到能力图标，默认显示对话图标
-		if (!capabilityIcons) {
-			capabilityIcons = "💬";
-		}
+		// 根据模型类型选择图标
+		const modelTypeIcon = isVisionModel ? "👁️" : "💬";
 		
 		// 设置建议项的显示文本 (Set the display text for the suggestion item)
 		// 格式: "Provider Name (model name) 图标" 
@@ -1560,7 +1566,7 @@ class ModelSuggestor extends EditorSuggest<IAIProvider> {
 			suggestion.model || "Default"
 		})`;
 		
-		const displayText = `${baseText} ${capabilityIcons}`;
+		const displayText = `${baseText} ${modelTypeIcon}`;
 		el.setText(displayText);
 
 		// 为当前选中的模型添加标记
@@ -1603,55 +1609,15 @@ class ModelSuggestor extends EditorSuggest<IAIProvider> {
 			);
 		}
 
-		// 获取模型能力
-		let modelCapabilities: AICapability[] = [];
-		
-		// 优先使用aiProvidersService判断能力
-		if (this.aiProvidersService) {
-			try {
-				modelCapabilities = this.aiProvidersService.getModelCapabilities(suggestion);
-			} catch (e) {
-				// 如果获取能力失败，回退到简单的视觉判断
-				const isVisionModel = this.plugin.isVisionCapableModel(suggestion);
-				if (isVisionModel) {
-					modelCapabilities = ['vision', 'dialogue']; // 假定具有视觉能力的模型也有对话能力
-				} else {
-					modelCapabilities = ['dialogue']; // 默认至少有对话能力
-				}
-			}
-		} else {
-			// 服务不可用时回退到简单的视觉判断
-			const isVisionModel = this.plugin.isVisionCapableModel(suggestion);
-			if (isVisionModel) {
-				modelCapabilities = ['vision', 'dialogue'];
-			} else {
-				modelCapabilities = ['dialogue'];
-			}
-		}
+		// 使用智能视觉模型判断器
+		const isVisionModel = this.plugin.isVisionCapableModel(suggestion);
 
-		// 根据模型能力决定如何更新设置
-		const hasVision = modelCapabilities.includes('vision');
-		const hasEmbedding = modelCapabilities.includes('embedding');
-		
-		// 如果是嵌入模型，不更新任何设置，因为目前没有单独的嵌入模型设置
-		if (hasEmbedding && !hasVision && modelCapabilities.length === 1) {
-			new Notice(`${suggestion.name} 是嵌入模型，适用于向量检索`);
-			// 嵌入模型可能需要单独的设置，目前暂不处理
-		} 
-		// 如果具有视觉能力，则作为视觉模型
-		else if (hasVision) {
-			// 同时更新主模型和视觉模型设置
+		// 更新对应的全局配置
+		if (isVisionModel) {
+			// 更新视觉模型配置
 			this.plugin.settings.aiProviders.vision = suggestion.id;
-			
-			// 如果这个模型同时也是当前主模型，通知用户
-			if (this.plugin.settings.aiProviders.main === suggestion.id) {
-				new Notice(`${suggestion.name} 同时设为主模型和视觉模型`);
-			} else {
-				new Notice(`已切换视觉模型为: ${suggestion.name}`);
-			}
-		} 
-		// 其他情况作为主模型
-		else {
+			new Notice(`已切换视觉模型为: ${suggestion.name}`);
+		} else {
 			// 更新主模型配置
 			this.plugin.settings.aiProviders.main = suggestion.id;
 			new Notice(`已切换主模型为: ${suggestion.name}`);

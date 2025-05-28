@@ -1,9 +1,18 @@
-import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting, ButtonComponent } from "obsidian";
 import { DEFAULT_SETTINGS } from "defaultSettings";
 import LocalGPT from "./main";
-import { LocalGPTAction } from "./interfaces";
+import { LocalGPTAction, LocalGPTSettings } from "./interfaces";
 import { waitForAI } from "@obsidian-ai-providers/sdk";
 import { clearTagCache } from "./tagManager";
+
+// 为防止类型错误，显式声明LocalGPT接口
+declare module "./main" {
+	export default interface LocalGPT {
+		settings: LocalGPTSettings;
+		saveSettings(): Promise<void>;
+		refreshTagCache(forceRefresh: boolean): Promise<void>;
+	}
+}
 
 const SEPARATOR = "✂️";
 
@@ -18,6 +27,17 @@ function escapeTitle(title?: string) {
 		.replace(/>/g, "&gt;")
 		.replace(/"/g, "&quot;")
 		.replace(/'/g, "&#039;");
+}
+
+// 辅助函数，给按钮添加样式类
+function addButtonClasses(button: ButtonComponent, ...classes: string[]): ButtonComponent {
+	// 获取按钮元素并添加类
+	if (button.buttonEl) {
+		classes.forEach(cls => {
+			button.buttonEl.addClass(cls);
+		});
+	}
+	return button;
 }
 
 export class LocalGPTSettingTab extends PluginSettingTab {
@@ -38,6 +58,21 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		try {
+			// 创建主设置区域标题
+			containerEl.createEl("h2", { 
+				text: "本地 GPT 设置",
+				cls: "local-gpt-settings-header" 
+			});
+			
+			// 创建AI提供商设置区域
+			const aiProviderSection = containerEl.createDiv({
+				cls: "local-gpt-settings-section"
+			});
+			
+			aiProviderSection.createEl("h3", { 
+				text: "AI 提供商配置" 
+			});
+
 			const aiProvidersWaiter = await waitForAI();
 			const aiProvidersResponse = await aiProvidersWaiter.promise;
 
@@ -56,9 +91,10 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 				},
 			);
 
-			new Setting(containerEl)
+			new Setting(aiProviderSection)
 				.setHeading()
-				.setName("Main AI Provider")
+				.setName("主要 AI 提供商")
+				.setDesc("选择默认使用的AI提供商")
 				.setClass("ai-providers-select")
 				.addDropdown((dropdown) =>
 					dropdown
@@ -71,9 +107,9 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 						}),
 				);
 
-			new Setting(containerEl)
-				.setName("Embedding AI Provider")
-				.setDesc("Optional. Used for ✨ Enhanced Actions.")
+			new Setting(aiProviderSection)
+				.setName("嵌入向量 AI 提供商")
+				.setDesc("可选。用于增强上下文功能")
 				.setClass("ai-providers-select")
 				.addDropdown((dropdown) =>
 					dropdown
@@ -88,11 +124,11 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 						}),
 				);
 
-			new Setting(containerEl)
-				.setName("Vision AI Provider")
+			new Setting(aiProviderSection)
+				.setName("视觉 AI 提供商")
 				.setClass("ai-providers-select")
 				.setDesc(
-					"Optional. This is used for images. If not set, the main AI provider will be used.",
+					"可选。用于处理图像。如未设置，将使用主要 AI 提供商。",
 				)
 				.addDropdown((dropdown) =>
 					dropdown
@@ -106,17 +142,26 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 							await this.display();
 						}),
 				);
+			
+			// 创建基本设置区域
+			const generalSection = containerEl.createDiv({
+				cls: "local-gpt-settings-section"
+			});
+			
+			generalSection.createEl("h3", { 
+				text: "基本设置" 
+			});
 
-			new Setting(containerEl)
-				.setName("Creativity")
-				.setDesc("")
+			new Setting(generalSection)
+				.setName("创造力水平")
+				.setDesc("控制AI生成内容的多样性和创造性")
 				.addDropdown((dropdown) => {
 					dropdown
-						.addOption("", "⚪ None")
+						.addOption("", "⚪ 无")
 						.addOptions({
-							low: "️💡 Low",
-							medium: "🎨 Medium",
-							high: "🚀 High",
+							low: "️💡 低",
+							medium: "🎨 中等",
+							high: "🚀 高",
 						})
 						.setValue(
 							String(this.plugin.settings.defaults.creativity) ||
@@ -129,7 +174,7 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 						});
 				});
 
-			new Setting(containerEl)
+			new Setting(generalSection)
 				.setName("显示模型信息")
 				.setDesc("控制是否在输出中默认显示模型名称和时间戳")
 				.addToggle((toggle) => {
@@ -141,7 +186,7 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 						});
 				});
 
-			new Setting(containerEl)
+			new Setting(generalSection)
 				.setName("显示性能数据")
 				.setDesc("控制是否在输出中默认显示Token数量和处理时间等性能数据")
 				.addToggle((toggle) => {
@@ -152,13 +197,40 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 							await this.plugin.saveSettings();
 						});
 				});
+				
+			new Setting(generalSection)
+				.setName("默认动作")
+				.setDesc("选择需要快速访问的默认动作，用于命令面板中的快速执行")
+				.addDropdown((dropdown) => {
+					// 添加空选项
+					dropdown.addOption("", "- 无默认动作 -");
+					
+					// 添加所有动作作为选项
+					this.plugin.settings.actions.forEach(action => {
+						dropdown.addOption(action.name, action.name);
+					});
+					
+					// 设置当前值
+					dropdown.setValue(this.plugin.settings.defaults.defaultAction || "");
+					
+					// 监听变化
+					dropdown.onChange(async (value) => {
+						this.plugin.settings.defaults.defaultAction = value || null;
+						await this.plugin.saveSettings();
+					});
+				});
 
 			// 添加标签管理设置部分
-			containerEl.createEl("div", { cls: "local-gpt-settings-separator" });
-			containerEl.createEl("h3", { text: "标签管理" });
+			const tagSection = containerEl.createDiv({
+				cls: "local-gpt-settings-section"
+			});
+			
+			tagSection.createEl("h3", { 
+				text: "标签管理" 
+			});
 			
 			// 启用标签缓存
-			new Setting(containerEl)
+			new Setting(tagSection)
 				.setName("启用标签缓存")
 				.setDesc("启用标签缓存可以提高模板变量渲染速度，但可能会占用额外内存")
 				.addToggle((toggle) => {
@@ -175,7 +247,7 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 				});
 				
 			// 缓存更新间隔
-			new Setting(containerEl)
+			new Setting(tagSection)
 				.setName("缓存更新间隔（分钟）")
 				.setDesc("设置标签缓存自动刷新的时间间隔")
 				.addSlider((slider) => {
@@ -190,7 +262,7 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 				});
 			
 			// 排除的文件夹
-			new Setting(containerEl)
+			new Setting(tagSection)
 				.setName("排除的文件夹")
 				.setDesc("不包含在标签统计中的文件夹路径，每行一个")
 				.addTextArea((textarea) => {
@@ -209,7 +281,7 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 				});
 			
 			// 手动刷新标签缓存按钮
-			new Setting(containerEl)
+			new Setting(tagSection)
 				.setName("刷新标签缓存")
 				.setDesc("手动刷新标签缓存，获取最新的标签统计信息")
 				.addButton((button) => {
@@ -232,8 +304,6 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 							}
 						});
 				});
-				
-			containerEl.createEl("div", { cls: "local-gpt-settings-separator" });
 
 		} catch (error) {
 			console.error(error);
@@ -248,22 +318,29 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 		};
 
 		const sharingActionsMapping = {
-			name: "Name: ",
-			system: "System: ",
-			prompt: "Prompt: ",
-			replace: "Replace: ",
-			model: "Model: ",
+			name: "名称: ",
+			system: "系统提示: ",
+			prompt: "用户提示: ",
+			replace: "替换文本: ",
+			model: "模型: ",
 		};
 
-		containerEl.createEl("h3", { text: "Actions" });
+		// 创建动作设置区域
+		const actionSection = containerEl.createDiv({
+			cls: "local-gpt-settings-section"
+		});
+		
+		actionSection.createEl("h3", { 
+			text: "动作管理" 
+		});
 
 		if (!this.editEnabled) {
-			const quickAdd = new Setting(containerEl)
-				.setName("Quick add")
+			const quickAdd = new Setting(actionSection)
+				.setName("快速添加")
 				.setDesc("")
 				.addText((text) => {
 					text.inputEl.style.minWidth = "100%";
-					text.setPlaceholder("Paste action");
+					text.setPlaceholder("粘贴动作配置");
 					text.onChange(async (value) => {
 						const quickAddAction: LocalGPTAction = value
 							.split(SEPARATOR)
@@ -300,44 +377,56 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 					});
 				});
 
-			quickAdd.descEl.innerHTML = `You can share the best sets prompts or get one <a href="https://github.com/pfrankov/obsidian-local-gpt/discussions/2">from the community</a>.<br/><strong>Important:</strong> if you already have an action with the same name it will be overwritten.`;
+			quickAdd.descEl.innerHTML = `您可以分享或获取更多动作配置 <a href="https://github.com/pfrankov/obsidian-local-gpt/discussions/2">从社区</a>。<br/><strong>注意:</strong> 如果已存在同名动作，将会被覆盖。`;
 
-			new Setting(containerEl)
-				.setName("Add new manually")
-				.addButton((button) =>
-					button.setIcon("plus").onClick(async () => {
-						this.editEnabled = true;
-						this.editExistingAction = undefined;
-						this.display();
-					}),
-				);
+			new Setting(actionSection)
+				.setName("手动添加")
+				.addButton((button) => {
+					// 使用辅助函数添加类
+					addButtonClasses(button, "local-gpt-button");
+					button
+						.setIcon("plus")
+						.onClick(async () => {
+							this.editEnabled = true;
+							this.editExistingAction = undefined;
+							this.display();
+						});
+				});
 		} else {
-			new Setting(containerEl).setName("Action name").addText((text) => {
+			const editSection = containerEl.createDiv({
+				cls: "local-gpt-settings-section"
+			});
+			
+			editSection.createEl("h3", { 
+				text: this.editExistingAction ? "编辑动作" : "新建动作" 
+			});
+			
+			new Setting(editSection).setName("动作名称").addText((text) => {
 				editingAction?.name && text.setValue(editingAction.name);
 				text.inputEl.style.minWidth = "100%";
-				text.setPlaceholder("Summarize selection");
+				text.setPlaceholder("输入动作名称");
 				text.onChange(async (value) => {
 					editingAction.name = value;
 				});
 			});
 
-			new Setting(containerEl)
-				.setName("System prompt")
-				.setDesc("Optional")
+			new Setting(editSection)
+				.setName("系统提示词")
+				.setDesc("可选，用于设置AI的角色和行为")
 				.addTextArea((text) => {
 					editingAction?.system &&
 						text.setValue(editingAction.system);
 					text.inputEl.style.minWidth = "100%";
 					text.inputEl.style.minHeight = "6em";
 					text.inputEl.style.resize = "vertical";
-					text.setPlaceholder("You are a helpful assistant.");
+					text.setPlaceholder("你是一个有帮助的助手。");
 					text.onChange(async (value) => {
 						editingAction.system = value;
 					});
 				});
 
-			const promptSetting = new Setting(containerEl)
-				.setName("Prompt")
+			const promptSetting = new Setting(editSection)
+				.setName("用户提示词")
 				.setDesc("")
 				.addTextArea((text) => {
 					editingAction?.prompt &&
@@ -351,12 +440,12 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 					});
 				});
 
-			promptSetting.descEl.innerHTML = `Please read about<br/><a href="https://github.com/pfrankov/obsidian-local-gpt/blob/master/docs/prompt-templating.md">Prompt templating</a><br/>if you want to customize<br/>your resulting prompts`;
+			promptSetting.descEl.innerHTML = `请阅读<br/><a href="https://github.com/pfrankov/obsidian-local-gpt/blob/master/docs/prompt-templating.md">提示词模板文档</a><br/>以了解如何自定义提示词`;
 
-			new Setting(containerEl)
-				.setName("Replace selected text")
+			new Setting(editSection)
+				.setName("替换选中文本")
 				.setDesc(
-					"If checked, the highlighted text will be replaced with a response from the model.",
+					"勾选后，AI 生成的内容将替换编辑器中选中的文本",
 				)
 				.addToggle((component) => {
 					editingAction?.replace &&
@@ -366,45 +455,55 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 					});
 				});
 
-			const actionButtonsRow = new Setting(containerEl).setName("");
+			const actionButtonsRow = new Setting(editSection).setName("");
 
 			if (this.editExistingAction) {
 				actionButtonsRow.addButton((button) => {
 					button.buttonEl.style.marginRight = "2em";
-					button.setButtonText("Remove").onClick(async () => {
-						if (!button.buttonEl.hasClass("mod-warning")) {
-							button.setClass("mod-warning");
-							return;
-						}
+					let btn = button
+						.setButtonText("删除")
+						.onClick(async () => {
+							if (!button.buttonEl.hasClass("mod-warning")) {
+								button.setClass("mod-warning");
+								return;
+							}
 
-						this.plugin.settings.actions =
-							this.plugin.settings.actions.filter(
-								(innerAction) => innerAction !== editingAction,
-							);
-						await this.plugin.saveSettings();
-						this.editExistingAction = undefined;
-						this.editEnabled = false;
-						this.display();
-					});
+							this.plugin.settings.actions =
+								this.plugin.settings.actions.filter(
+									(innerAction) => innerAction !== editingAction,
+								);
+							await this.plugin.saveSettings();
+							this.editExistingAction = undefined;
+							this.editEnabled = false;
+							this.display();
+						});
+						
+					// 使用辅助函数添加类
+					addButtonClasses(btn, "local-gpt-button", "local-gpt-button-danger");
 				});
 			}
 
 			actionButtonsRow
 				.addButton((button) => {
-					button.setButtonText("Close").onClick(async () => {
-						this.editEnabled = false;
-						this.editExistingAction = undefined;
-						this.display();
-					});
+					let btn = button
+						.setButtonText("取消")
+						.onClick(async () => {
+							this.editEnabled = false;
+							this.editExistingAction = undefined;
+							this.display();
+						});
+						
+					// 使用辅助函数添加类
+					addButtonClasses(btn, "local-gpt-button");
 				})
-				.addButton((button) =>
-					button
+				.addButton((button) => {
+					let btn = button
 						.setCta()
-						.setButtonText("Save")
+						.setButtonText("保存")
 						.onClick(async () => {
 							if (!editingAction.name) {
 								new Notice(
-									"Please enter a name for the action.",
+									"请输入动作名称",
 								);
 								return;
 							}
@@ -417,7 +516,7 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 									)
 								) {
 									new Notice(
-										`An action with the name "${editingAction.name}" already exists.`,
+										`已存在名为"${editingAction.name}"的动作`,
 									);
 									return;
 								}
@@ -431,7 +530,7 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 									).length > 1
 								) {
 									new Notice(
-										`An action with the name "${editingAction.name}" already exists.`,
+										`已存在名为"${editingAction.name}"的动作`,
 									);
 									return;
 								}
@@ -451,127 +550,189 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 							this.editEnabled = false;
 							this.editExistingAction = undefined;
 							this.display();
-						}),
-				);
+						});
+						
+					// 使用辅助函数添加类
+					addButtonClasses(btn, "local-gpt-button", "local-gpt-button-primary");
+				});
 		}
 
-		containerEl.createEl("h4", { text: "Actions list" });
-
-		this.plugin.settings.actions.forEach((action, actionIndex) => {
-			const sharingString = [
-				action.name && `${sharingActionsMapping.name}${action.name}`,
-				action.system &&
-					`${sharingActionsMapping.system}${action.system}`,
-				action.prompt &&
-					`${sharingActionsMapping.prompt}${action.prompt}`,
-				action.replace &&
-					`${sharingActionsMapping.replace}${action.replace}`,
-			]
-				.filter(Boolean)
-				.join(` ${SEPARATOR}\n`);
-
-			if (!this.changingOrder) {
-				const actionRow = new Setting(containerEl)
-					.setName(action.name)
-					.setDesc("")
-					.addButton((button) =>
-						button.setIcon("copy").onClick(async () => {
-							navigator.clipboard.writeText(sharingString);
-							new Notice("Copied");
-						}),
-					)
-					.addButton((button) =>
-						button.setButtonText("Edit").onClick(async () => {
-							this.editEnabled = true;
-							this.editExistingAction =
-								this.plugin.settings.actions.find(
-									(innerAction) =>
-										innerAction.name == action.name,
-								);
-							this.display();
-						}),
-					);
-
-				const systemTitle = escapeTitle(action.system);
-
-				const promptTitle = escapeTitle(action.prompt);
-
-				actionRow.descEl.innerHTML = [
+		if (!this.editEnabled) {
+			const actionsListContainer = containerEl.createDiv();
+			actionsListContainer.createEl("h4", { 
+				text: "动作列表",
+				cls: "local-gpt-settings-header" 
+			});
+	
+			this.plugin.settings.actions.forEach((action, actionIndex) => {
+				const sharingString = [
+					action.name && `${sharingActionsMapping.name}${action.name}`,
 					action.system &&
-						`<div title="${systemTitle}" style="text-overflow: ellipsis; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
-							<b>${sharingActionsMapping.system}</b>${action.system}</div>`,
+						`${sharingActionsMapping.system}${action.system}`,
 					action.prompt &&
-						`<div title="${promptTitle}" style="text-overflow: ellipsis; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
-							<b>${sharingActionsMapping.prompt}</b>${action.prompt}
-						</div>`,
+						`${sharingActionsMapping.prompt}${action.prompt}`,
+					action.replace &&
+						`${sharingActionsMapping.replace}${action.replace}`,
 				]
 					.filter(Boolean)
-					.join("<br/>\n");
-			} else {
-				const actionRow = new Setting(containerEl)
-					.setName(action.name)
-					.setDesc("");
-
-				if (actionIndex > 0) {
-					actionRow.addButton((button) =>
-						button.setIcon("arrow-up").onClick(async () => {
-							const prev =
-								this.plugin.settings.actions[actionIndex - 1];
-							this.plugin.settings.actions[actionIndex - 1] =
-								action;
-							this.plugin.settings.actions[actionIndex] = prev;
-							await this.plugin.saveSettings();
-							this.display();
-						}),
-					);
-				}
-				if (actionIndex < this.plugin.settings.actions.length - 1) {
-					actionRow.addButton((button) =>
-						button.setIcon("arrow-down").onClick(async () => {
-							const next =
-								this.plugin.settings.actions[actionIndex + 1];
-							this.plugin.settings.actions[actionIndex + 1] =
-								action;
-							this.plugin.settings.actions[actionIndex] = next;
-							await this.plugin.saveSettings();
-							this.display();
-						}),
-					);
-				}
-			}
-		});
-
-		if (this.plugin.settings.actions.length) {
-			new Setting(containerEl).setName("").addButton((button) => {
-				this.changingOrder && button.setCta();
-				button
-					.setButtonText(this.changingOrder ? "Done" : "Change order")
-					.onClick(async () => {
-						this.changingOrder = !this.changingOrder;
-						this.display();
+					.join(` ${SEPARATOR}\n`);
+	
+				if (!this.changingOrder) {
+					const actionItemDiv = actionsListContainer.createDiv({
+						cls: "local-gpt-action-item" + (this.plugin.settings.defaults.defaultAction === action.name ? " local-gpt-action-item-selected" : "")
 					});
+					
+					const actionRow = new Setting(actionItemDiv)
+						.setName(action.name)
+						.setDesc("");
+						
+					actionRow
+						.addButton((button) => {
+							let btn = button
+								.setIcon("copy")
+								.setTooltip("复制")
+								.onClick(async () => {
+									navigator.clipboard.writeText(sharingString);
+									new Notice("已复制");
+								});
+								
+							// 使用辅助函数添加类
+							addButtonClasses(btn, "local-gpt-button");
+						})
+						.addButton((button) => {
+							let btn = button
+								.setButtonText("编辑")
+								.onClick(async () => {
+									this.editEnabled = true;
+									this.editExistingAction =
+										this.plugin.settings.actions.find(
+											(innerAction) =>
+												innerAction.name == action.name,
+										);
+									this.display();
+								});
+								
+							// 使用辅助函数添加类
+							addButtonClasses(btn, "local-gpt-button");
+						});
+	
+					const systemTitle = escapeTitle(action.system);
+	
+					const promptTitle = escapeTitle(action.prompt);
+	
+					actionRow.descEl.innerHTML = [
+						action.system &&
+							`<div title="${systemTitle}" style="text-overflow: ellipsis; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+								<b>${sharingActionsMapping.system}</b>${action.system}</div>`,
+						action.prompt &&
+							`<div title="${promptTitle}" style="text-overflow: ellipsis; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+								<b>${sharingActionsMapping.prompt}</b>${action.prompt}
+							</div>`,
+					]
+						.filter(Boolean)
+						.join("<br/>\n");
+				} else {
+					const actionItemDiv = actionsListContainer.createDiv({
+						cls: "local-gpt-action-item"
+					});
+					
+					const actionRow = new Setting(actionItemDiv)
+						.setName(action.name)
+						.setDesc("");
+	
+					if (actionIndex > 0) {
+						actionRow.addButton((button) => {
+							let btn = button
+								.setIcon("arrow-up")
+								.setTooltip("上移")
+								.onClick(async () => {
+									const prev =
+										this.plugin.settings.actions[actionIndex - 1];
+									this.plugin.settings.actions[actionIndex - 1] =
+										action;
+									this.plugin.settings.actions[actionIndex] = prev;
+									await this.plugin.saveSettings();
+									this.display();
+								});
+								
+							// 使用辅助函数添加类
+							addButtonClasses(btn, "local-gpt-button");
+						});
+					}
+					if (actionIndex < this.plugin.settings.actions.length - 1) {
+						actionRow.addButton((button) => {
+							let btn = button
+								.setIcon("arrow-down")
+								.setTooltip("下移")
+								.onClick(async () => {
+									const next =
+										this.plugin.settings.actions[actionIndex + 1];
+									this.plugin.settings.actions[actionIndex + 1] =
+										action;
+									this.plugin.settings.actions[actionIndex] = next;
+									await this.plugin.saveSettings();
+									this.display();
+								});
+								
+							// 使用辅助函数添加类
+							addButtonClasses(btn, "local-gpt-button");
+						});
+					}
+				}
 			});
+	
+			if (this.plugin.settings.actions.length) {
+				new Setting(actionsListContainer)
+					.setName("")
+					.addButton((button) => {
+						this.changingOrder && button.setCta();
+						let btn = button
+							.setButtonText(this.changingOrder ? "完成排序" : "更改顺序")
+							.onClick(async () => {
+								this.changingOrder = !this.changingOrder;
+								this.display();
+							});
+							
+						// 使用辅助函数添加类
+						addButtonClasses(btn, "local-gpt-button");
+						if (this.changingOrder) {
+							addButtonClasses(btn, "local-gpt-button-primary");
+						}
+					});
+			}
+	
+			// 危险区域
+			const dangerZone = containerEl.createDiv({
+				cls: "local-gpt-settings-section"
+			});
+			
+			dangerZone.createEl("h4", { 
+				text: "危险区域",
+				cls: "local-gpt-settings-header"
+			});
+			
+			new Setting(dangerZone)
+				.setName("重置动作")
+				.setDesc(
+					"🚨 将所有动作重置为默认值。此操作不可撤销，将删除所有自定义动作。",
+				)
+				.addButton((button) => {
+					let btn = button
+						.setClass("mod-warning")
+						.setButtonText("重置")
+						.onClick(async () => {
+							button.setDisabled(true);
+							button.buttonEl.setAttribute("disabled", "true");
+							button.buttonEl.classList.remove("mod-warning");
+							this.plugin.settings.actions = DEFAULT_SETTINGS.actions;
+							await this.plugin.saveSettings();
+							this.display();
+						});
+						
+					// 使用辅助函数添加类
+					addButtonClasses(btn, "local-gpt-button", "local-gpt-button-danger");
+				});
 		}
-
-		containerEl.createEl("h4", { text: "Danger zone" });
-		new Setting(containerEl)
-			.setName("Reset actions")
-			.setDesc(
-				"🚨 Reset all actions to the default. This cannot be undone and will delete all your custom actions.",
-			)
-			.addButton((button) =>
-				button
-					.setClass("mod-warning")
-					.setButtonText("Reset")
-					.onClick(async () => {
-						button.setDisabled(true);
-						button.buttonEl.setAttribute("disabled", "true");
-						button.buttonEl.classList.remove("mod-warning");
-						this.plugin.settings.actions = DEFAULT_SETTINGS.actions;
-						await this.plugin.saveSettings();
-						this.display();
-					}),
-			);
 	}
 
 	async addNewAction(editingAction: LocalGPTAction) {
@@ -583,14 +744,14 @@ export class LocalGPTSettingTab extends PluginSettingTab {
 		if (alreadyExistingActionIndex >= 0) {
 			this.plugin.settings.actions[alreadyExistingActionIndex] =
 				editingAction;
-			new Notice(`Rewritten "${editingAction.name}" action`);
+			new Notice(`已更新"${editingAction.name}"动作`);
 		} else {
 			this.plugin.settings.actions = [
 				editingAction,
 				...this.plugin.settings.actions,
 			];
-			new Notice(`Added "${editingAction.name}" action`);
+			new Notice(`已添加"${editingAction.name}"动作`);
 		}
 		await this.plugin.saveSettings();
 	}
-}
+} 

@@ -10,6 +10,7 @@ export const DEFAULT_SETTINGS: LocalGPTSettings = {
 		creativity: "low",
 		showModelInfo: true,
 		showPerformance: true,
+		defaultAction: null,
 	},
 	tags: {
 		cacheEnabled: true,
