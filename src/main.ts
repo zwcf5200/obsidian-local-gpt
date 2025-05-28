@@ -312,6 +312,10 @@ export default class LocalGPT extends Plugin {
 				);
 				if (visionProvider) {
 					provider = visionProvider;
+					// 更新模型显示名称，确保显示正确的视觉模型名称
+					modelDisplayName = `${visionProvider.name}${
+						visionProvider.model ? ` (${visionProvider.model})` : ""
+					}`;
 					new Notice(
 						`已切换到支持视觉的模型: ${provider.name} 处理图像。`,
 					);
@@ -328,6 +332,18 @@ export default class LocalGPT extends Plugin {
 				// and no specific vision provider is set, we might proceed without vision
 				// or throw an error depending on desired behavior. Here, we'll let it proceed
 				// and the provider itself might error out if it can't handle images.
+			}
+		} else {
+			// 如果没有图片，确保使用主模型（而不是上次可能使用的视觉模型）
+			const mainProvider = aiProviders.providers.find(
+				(p: IAIProvider) => p.id === this.settings.aiProviders.main,
+			);
+			if (mainProvider) {
+				provider = mainProvider;
+				// 更新模型显示名称为主模型
+				modelDisplayName = `${mainProvider.name}${
+					mainProvider.model ? ` (${mainProvider.model})` : ""
+				}`;
 			}
 		}
 
@@ -1501,11 +1517,41 @@ class ModelSuggestor extends EditorSuggest<IAIProvider> {
 
 	// 渲染每个建议项 (Render each suggestion item)
 	renderSuggestion(suggestion: IAIProvider, el: HTMLElement): void {
-		// 使用智能视觉模型判断器确定模型类型
-		const isVisionModel = this.plugin.isVisionCapableModel(suggestion);
+		// 获取真实模型能力
+		let modelCapabilities: AICapability[] = [];
+		let capabilityIcons = ""; // 所有能力的图标
 		
-		// 根据模型类型选择图标
-		const modelTypeIcon = isVisionModel ? "👁️" : "💬";
+		if (this.aiProvidersService) {
+			try {
+				// 与runAction方法一致，使用aiProvidersService.getModelCapabilities获取能力
+				modelCapabilities = this.aiProvidersService.getModelCapabilities(suggestion);
+				
+				// 使用与getCapabilityIcons相同的逻辑处理多个能力图标
+				if (modelCapabilities && modelCapabilities.length > 0) {
+					const iconMap: Record<AICapability, string> = {
+						'dialogue': '💬',
+						'vision': '👁️',
+						'tool_use': '🔧',
+						'text_to_image': '🖼️',
+						'embedding': '🔍'
+					};
+					capabilityIcons = modelCapabilities.map(cap => iconMap[cap] || '').join(' ');
+				}
+			} catch (e) {
+				// 如果获取能力失败，回退到旧方法
+				const isVisionModel = this.plugin.isVisionCapableModel(suggestion);
+				capabilityIcons = isVisionModel ? "👁️" : "💬";
+			}
+		} else {
+			// 服务不可用时回退到旧方法
+			const isVisionModel = this.plugin.isVisionCapableModel(suggestion);
+			capabilityIcons = isVisionModel ? "👁️" : "💬";
+		}
+		
+		// 如果没有获取到能力图标，默认显示对话图标
+		if (!capabilityIcons) {
+			capabilityIcons = "💬";
+		}
 		
 		// 设置建议项的显示文本 (Set the display text for the suggestion item)
 		// 格式: "Provider Name (model name) 图标" 
@@ -1514,7 +1560,7 @@ class ModelSuggestor extends EditorSuggest<IAIProvider> {
 			suggestion.model || "Default"
 		})`;
 		
-		const displayText = `${baseText} ${modelTypeIcon}`;
+		const displayText = `${baseText} ${capabilityIcons}`;
 		el.setText(displayText);
 
 		// 为当前选中的模型添加标记
@@ -1557,15 +1603,55 @@ class ModelSuggestor extends EditorSuggest<IAIProvider> {
 			);
 		}
 
-		// 使用智能视觉模型判断器
-		const isVisionModel = this.plugin.isVisionCapableModel(suggestion);
-
-		// 更新对应的全局配置
-		if (isVisionModel) {
-			// 更新视觉模型配置
-			this.plugin.settings.aiProviders.vision = suggestion.id;
-			new Notice(`已切换视觉模型为: ${suggestion.name}`);
+		// 获取模型能力
+		let modelCapabilities: AICapability[] = [];
+		
+		// 优先使用aiProvidersService判断能力
+		if (this.aiProvidersService) {
+			try {
+				modelCapabilities = this.aiProvidersService.getModelCapabilities(suggestion);
+			} catch (e) {
+				// 如果获取能力失败，回退到简单的视觉判断
+				const isVisionModel = this.plugin.isVisionCapableModel(suggestion);
+				if (isVisionModel) {
+					modelCapabilities = ['vision', 'dialogue']; // 假定具有视觉能力的模型也有对话能力
+				} else {
+					modelCapabilities = ['dialogue']; // 默认至少有对话能力
+				}
+			}
 		} else {
+			// 服务不可用时回退到简单的视觉判断
+			const isVisionModel = this.plugin.isVisionCapableModel(suggestion);
+			if (isVisionModel) {
+				modelCapabilities = ['vision', 'dialogue'];
+			} else {
+				modelCapabilities = ['dialogue'];
+			}
+		}
+
+		// 根据模型能力决定如何更新设置
+		const hasVision = modelCapabilities.includes('vision');
+		const hasEmbedding = modelCapabilities.includes('embedding');
+		
+		// 如果是嵌入模型，不更新任何设置，因为目前没有单独的嵌入模型设置
+		if (hasEmbedding && !hasVision && modelCapabilities.length === 1) {
+			new Notice(`${suggestion.name} 是嵌入模型，适用于向量检索`);
+			// 嵌入模型可能需要单独的设置，目前暂不处理
+		} 
+		// 如果具有视觉能力，则作为视觉模型
+		else if (hasVision) {
+			// 同时更新主模型和视觉模型设置
+			this.plugin.settings.aiProviders.vision = suggestion.id;
+			
+			// 如果这个模型同时也是当前主模型，通知用户
+			if (this.plugin.settings.aiProviders.main === suggestion.id) {
+				new Notice(`${suggestion.name} 同时设为主模型和视觉模型`);
+			} else {
+				new Notice(`已切换视觉模型为: ${suggestion.name}`);
+			}
+		} 
+		// 其他情况作为主模型
+		else {
 			// 更新主模型配置
 			this.plugin.settings.aiProviders.main = suggestion.id;
 			new Notice(`已切换主模型为: ${suggestion.name}`);
