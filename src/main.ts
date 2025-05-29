@@ -75,7 +75,6 @@ export default class LocalGPT extends Plugin {
 	private animationFrameId: number | null = null; // 动画帧 ID
 	private totalProgressSteps: number = 0; // 总进度步数
 	private completedProgressSteps: number = 0; // 已完成的进度步数
-	private lastTokenStats: ITokenConsumptionStats | null = null; // 上一次的token统计，用于计算增量
 
 	editorSuggest?: ModelSuggestor; // 用于存储 "@" 模型建议器的实例
 	actionSuggest?: ActionSuggestor; // 用于存储 "::" 动作建议器的实例
@@ -1420,6 +1419,10 @@ class ActionSuggestor extends EditorSuggest<LocalGPTAction> {
 		// 提示用户动作已执行 (Notify the user that the action has been executed)
 		// new Notice(`Running action: ${action.name}`); // runAction 内部已有 Notice，此处可省略 (Notice already in runAction, can be omitted here)
 		this.close(); // 显式关闭建议器 (Explicitly close the suggester)
+
+		// 切换默认动作
+		this.plugin.settings.defaults.defaultAction = action.name;
+		this.plugin.saveSettings();
 	}
 }
 
