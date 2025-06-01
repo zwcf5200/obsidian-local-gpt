@@ -98,13 +98,6 @@ import {
 	IServiceContainer
 } from "./core/index";
 
-// 定义本地接口，与SDK中的对应
-interface ITokenConsumptionStats {
-    totalPromptTokens: number;
-    totalCompletionTokens: number;
-    totalTokens: number;
-}
-
 export default class LocalGPT extends Plugin {
 	settings: LocalGPTSettings; // 插件设置
 	abortControllers: AbortController[] = []; // 用于管理异步操作的中止控制器数组
@@ -759,18 +752,6 @@ export default class LocalGPT extends Plugin {
 		this.statusBarManager.hide();
 		this.eventBus.emit(Events.PROGRESS_COMPLETE);
 	}
-
-	// 智能 Token 估算器 (Smart Token Estimator)
-	// 此方法已移至 utils/tokenUtils.ts
-
-	// 估算输入输出 tokens (Estimate input/output tokens)
-	// 此方法已移至 utils/tokenUtils.ts
-
-	// 智能视觉模型判断器 (Smart Vision Model Detector)
-	// 此方法已移至 utils/modelUtils.ts
-
-	// 根据模型能力生成图标
-	// 此方法已移至 utils/modelUtils.ts
 
 	// 刷新标签缓存
 	async refreshTagCache(forceRefresh: boolean = true) {

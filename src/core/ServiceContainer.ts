@@ -202,27 +202,3 @@ export class ServiceLocator {
         return ServiceLocator.container;
     }
 }
-
-// 注释掉装饰器，因为需要 reflect-metadata
-// /**
-//  * 装饰器：自动注入依赖
-//  */
-// export function inject<T>(token: ServiceToken<T>) {
-//     return function (target: any, propertyKey: string | symbol, parameterIndex?: number) {
-//         if (parameterIndex !== undefined) {
-//             // 构造函数参数注入
-//             const existingTokens = Reflect.getMetadata('inject:tokens', target) || [];
-//             existingTokens[parameterIndex] = token;
-//             Reflect.defineMetadata('inject:tokens', existingTokens, target);
-//         } else {
-//             // 属性注入
-//             Object.defineProperty(target, propertyKey, {
-//                 get() {
-//                     return ServiceLocator.get(token);
-//                 },
-//                 enumerable: true,
-//                 configurable: true
-//             });
-//         }
-//     };
-// } 
