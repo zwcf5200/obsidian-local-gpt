@@ -30,7 +30,6 @@ import {
 import { LocalGPTSettingTab } from "./LocalGPTSettingTab";
 import { CREATIVITY, DEFAULT_SETTINGS } from "defaultSettings";
 import { spinnerPlugin } from "./spinnerPlugin";
-import { removeThinkingTags } from "./text-processing";
 import { LocalGPTAction, LocalGPTSettings } from "./interfaces";
 
 import {
@@ -39,7 +38,6 @@ import {
 	queryVectorStore,
 	startProcessing,
 } from "./rag";
-import { logger } from "./logger";
 import { fileCache } from "./indexedDB";
 import {
 	initAI,
@@ -52,11 +50,53 @@ import {
 	ReportUsageCallback,
 	IUsageMetrics,
 } from "@obsidian-ai-providers/sdk";
-import { preparePrompt } from "./utils";
 import {
 	getAllTagStats,
 	clearTagCache,
 } from "./tagManager";
+
+// 导入工具函数
+import {
+	processGeneratedText,
+	removeThinkingTags,
+	extractImageLinks,
+	estimateTokenUsage,
+	isVisionCapableModel,
+	getCapabilityIcons,
+	preparePrompt,
+	logger
+} from "./utils/index";
+
+// 导入 UI 组件
+import {
+	ModelSuggestor,
+	ActionSuggestor,
+	StatusBarManager
+} from "./ui/index";
+
+// 导入服务
+import {
+	AIServiceManager,
+	TokenData
+} from "./services/index";
+
+// 导入核心功能和架构组件
+import {
+	ActionExecutor,
+	ContextEnhancer,
+	// 架构组件
+	EventBus,
+	globalEventBus,
+	Events,
+	ServiceContainer,
+	ServiceLocator,
+	ServiceTokens,
+	ErrorHandler,
+	ErrorSeverity,
+	IErrorHandler,
+	IEventBus,
+	IServiceContainer
+} from "./core/index";
 
 // 定义本地接口，与SDK中的对应
 interface ITokenConsumptionStats {
@@ -69,21 +109,34 @@ export default class LocalGPT extends Plugin {
 	settings: LocalGPTSettings; // 插件设置
 	abortControllers: AbortController[] = []; // 用于管理异步操作的中止控制器数组
 	updatingInterval: number; // 更新检查的定时器 ID
-	private statusBarItem: HTMLElement; // 状态栏元素
-	private currentPercentage: number = 0; // 当前进度百分比（用于动画）
-	private targetPercentage: number = 0; // 目标进度百分比
-	private animationFrameId: number | null = null; // 动画帧 ID
-	private totalProgressSteps: number = 0; // 总进度步数
-	private completedProgressSteps: number = 0; // 已完成的进度步数
+	private statusBarManager: StatusBarManager; // 状态栏管理器
+	aiServiceManager: AIServiceManager; // AI 服务管理器 (改为公共属性以符合接口)
+	private actionExecutor: ActionExecutor; // 动作执行器
+	private contextEnhancer: ContextEnhancer; // 上下文增强器
+
+	// 架构组件
+	private container: IServiceContainer; // 依赖注入容器
+	private eventBus: IEventBus; // 事件总线
+	private errorHandler: IErrorHandler; // 错误处理器
 
 	editorSuggest?: ModelSuggestor; // 用于存储 "@" 模型建议器的实例
 	actionSuggest?: ActionSuggestor; // 用于存储 "::" 动作建议器的实例
 
 	// 插件加载时的生命周期方法
 	async onload() {
+		// 初始化架构组件
+		this.initializeArchitecture();
+
 		// 初始化 AI 服务
 		initAI(this.app, this, async () => {
 			await this.loadSettings(); // 加载设置
+			
+			// 注册服务到容器
+			this.registerServices();
+			
+			// 初始化核心服务
+			await this.initializeServices();
+			
 			// 添加设置页面标签
 			this.addSettingTab(new LocalGPTSettingTab(this.app, this));
 			this.reload(); // 设置插件配置
@@ -110,28 +163,102 @@ export default class LocalGPT extends Plugin {
 			// 注册动作建议器 (用于 "::" 触发)
 			this.actionSuggest = new ActionSuggestor(this);
 			this.registerEditorSuggest(this.actionSuggest);
+			
+			// 设置事件监听
+			this.setupEventListeners();
+		});
+	}
+
+	/**
+	 * 初始化架构组件
+	 */
+	private initializeArchitecture(): void {
+		// 创建依赖注入容器
+		this.container = new ServiceContainer();
+		ServiceLocator.setContainer(this.container);
+		
+		// 使用全局事件总线
+		this.eventBus = globalEventBus;
+		
+		// 创建错误处理器
+		this.errorHandler = new ErrorHandler(this.eventBus);
+	}
+
+	/**
+	 * 注册服务到容器
+	 */
+	private registerServices(): void {
+		// 注册基础服务
+		this.container.registerInstance(ServiceTokens.App, this.app);
+		this.container.registerInstance(ServiceTokens.Plugin, this);
+		this.container.registerInstance(ServiceTokens.Settings, this.settings);
+		this.container.registerInstance(ServiceTokens.EventBus, this.eventBus);
+		this.container.registerInstance(ServiceTokens.ErrorHandler, this.errorHandler);
+		
+		// 注册服务工厂
+		this.container.register(ServiceTokens.AIServiceManager, 
+			(container) => new AIServiceManager(
+				container.get(ServiceTokens.App),
+				container.get(ServiceTokens.Settings)
+			)
+		);
+		
+		this.container.register(ServiceTokens.StatusBarManager,
+			(container) => new StatusBarManager(container.get(ServiceTokens.Plugin))
+		);
+		
+		this.container.register(ServiceTokens.ActionExecutor,
+			(container) => new ActionExecutor(container.get(ServiceTokens.Plugin))
+		);
+		
+		this.container.register(ServiceTokens.ContextEnhancer,
+			(container) => new ContextEnhancer(container.get(ServiceTokens.Plugin))
+		);
+	}
+
+	/**
+	 * 初始化服务
+	 */
+	private async initializeServices(): Promise<void> {
+		// 从容器获取服务
+		this.aiServiceManager = this.container.get(ServiceTokens.AIServiceManager);
+		this.statusBarManager = this.container.get(ServiceTokens.StatusBarManager);
+		this.actionExecutor = this.container.get(ServiceTokens.ActionExecutor);
+		this.contextEnhancer = this.container.get(ServiceTokens.ContextEnhancer);
+		
+		// 发送初始化完成事件
+		this.eventBus.emit(Events.SETTINGS_CHANGED, { settings: this.settings });
+	}
+
+	/**
+	 * 设置事件监听
+	 */
+	private setupEventListeners(): void {
+		// 监听 AI 请求错误
+		this.eventBus.on(Events.AI_REQUEST_ERROR, (data) => {
+			logger.error('AI 请求错误', data);
+		});
+		
+		// 监听性能指标
+		this.eventBus.on(Events.PERFORMANCE_METRIC, (data) => {
+			logger.debug('性能指标', data);
+		});
+		
+		// 监听 Token 使用
+		this.eventBus.on(Events.TOKEN_USAGE, (data) => {
+			logger.debug('Token 使用', data);
 		});
 	}
 
 	// 初始化状态栏
 	private initializeStatusBar() {
-		this.statusBarItem = this.addStatusBarItem();
-		this.statusBarItem.addClass("local-gpt-status");
-		this.statusBarItem.hide();
+		// 状态栏管理器已通过容器初始化
 	}
 
 	// 处理 AI 生成的文本
 	// 移除思考标签 <think>...</think> 并格式化输出
 	processText(text: string, selectedText: string) {
-		if (!text.trim()) {
-			return "";
-		}
-
-		// 移除 <think>...</think> 标签及其内容
-		const cleanText = removeThinkingTags(text).trim();
-
-		// 返回格式化后的文本，不再删除原始选中文本
-		return ["\n", cleanText, "\n"].join("");
+		return processGeneratedText(text, selectedText);
 	}
 
 	// 添加命令面板命令
@@ -214,480 +341,39 @@ export default class LocalGPT extends Plugin {
 
 	// 执行指定的 AI 动作
 	async runAction(action: LocalGPTAction, editor: Editor) {
-		// @ts-expect-error, not typed
-		const editorView = editor.cm;
-
-		// 获取选中的文本，如果没有选中则使用整个文档
-		const selection = editor.getSelection();
-		let selectedText = selection || editor.getValue();
-		const cursorPositionFrom = editor.getCursor("from");
-		const cursorPositionTo = editor.getCursor("to");
-
-		// 创建中止控制器，允许用户通过 ESC 键取消操作
-		const abortController = new AbortController();
-		this.abortControllers.push(abortController);
-
-		// 显示加载动画
-		const spinner = editorView.plugin(spinnerPlugin) || undefined;
-		const hideSpinner = spinner?.show(editor.posToOffset(cursorPositionTo));
-		this.app.workspace.updateOptions();
-
-		// 实时更新处理进度的回调函数
-		const onUpdate = (updatedString: string) => {
-			spinner.processText(updatedString, (text: string) =>
-				this.processText(text, selectedText),
-			);
-			this.app.workspace.updateOptions();
-		};
-
-		// 提取并处理文本中的图片链接
-		// 修改正则表达式，使其能够同时匹配![[文件名.png]]和[[文件名.png]]格式
-		const regexp = /(!?\[\[(.+?\.(?:png|jpe?g))])/gi;
-		
-		// 提取所有图片文件名
-		const fileNames = Array.from(
-			selectedText.matchAll(regexp),
-			(match) => {
-				// 返回匹配的文件名部分
-				const fileName = match[2];
-				return fileName;
-			}
-		);
-
-		// 从文本中移除图片链接
-		selectedText = selectedText.replace(regexp, "");
-
-		// 将图片转换为 Base64 编码
-		const imagesInBase64 =
-			(
-				await Promise.all<string>(
-					fileNames.map((fileName) => {
-						const filePath =
-							this.app.metadataCache.getFirstLinkpathDest(
-								fileName,
-								// @ts-ignore
-								this.app.workspace.getActiveFile().path,
-							);
-
-						if (!filePath) {
-							return Promise.resolve("");
-						}
-
-						return this.app.vault.adapter
-							.readBinary(filePath.path)
-							.then((buffer) => {
-								const extension =
-									filePath.extension.toLowerCase();
-								const mimeType =
-									extension === "jpg" ? "jpeg" : extension;
-								const blob = new Blob([buffer], {
-									type: `image/${mimeType}`,
-								});
-								return new Promise((resolve) => {
-									const reader = new FileReader();
-									reader.onloadend = () =>
-										resolve(reader.result as string);
-									reader.readAsDataURL(blob);
-								});
-							});
-					}),
-				)
-			).filter(Boolean) || [];
-
-		// 日志记录
-		logger.time("Processing Embeddings");
-
-		logger.timeEnd("Processing Embeddings");
-		logger.debug("Selected text", selectedText);
-
-		// 等待 AI 服务初始化完成
-		const aiRequestWaiter = await waitForAI();
-
-		const aiProviders: IAIProvidersService = await aiRequestWaiter.promise;
-
-		// 增强上下文：从链接的文件中获取相关内容
-		const context = await this.enhanceWithContext(
-			selectedText,
-			aiProviders,
-			aiProviders.providers.find(
-				(provider: IAIProvider) =>
-					provider.id === this.settings.aiProviders.embedding,
-			),
-			abortController,
-		);
-
-		// 选择要使用的 AI Provider
-		let provider = aiProviders.providers.find(
-			// 使用全局配置的主AI Provider (Use the globally configured main AI provider)
-			(p: IAIProvider) => p.id === this.settings.aiProviders.main,
-		);
-		let modelDisplayName: string = ""; // 用于存储模型显示名称 (To store the model display name)
-
-		// 设置模型显示名称
-		if (provider) {
-			modelDisplayName = `${provider.name}${
-				provider.model ? ` (${provider.model})` : ""
-			}`;
-		}
-
-		// 处理图像：如果存在图像，并且当前选择的 Provider 不支持视觉功能，则尝试切换到视觉兼容的 Provider
-		// (Handle images: if images are present and the currently selected provider does not support vision, try switching to a vision-compatible provider)
-		if (imagesInBase64.length) {
-			// 获取当前模型的能力
-			let modelCapabilities: AICapability[] = [];
-			if (provider) {
-				modelCapabilities = aiProviders.getModelCapabilities(provider);
-			}
-
-			// 如果有图片，并且当前选择的provider不支持vision，尝试切换到vision-compatible provider
-			if (!provider || !modelCapabilities.includes('vision')) {
-				const visionProvider = aiProviders.providers.find(
-					(p: IAIProvider) =>
-						p.id === this.settings.aiProviders.vision,
-				);
-				if (visionProvider) {
-					provider = visionProvider;
-					// 更新模型显示名称，确保显示正确的视觉模型名称
-					modelDisplayName = `${visionProvider.name}${
-						visionProvider.model ? ` (${visionProvider.model})` : ""
-					}`;
-					new Notice(
-						`已切换到支持视觉的模型: ${provider.name} 处理图像。`,
-					);
-				} else if (!provider) {
-					// If no provider was selected at all and vision is needed but not configured
-					new Notice(
-						"未配置视觉模型，但请求中包含图像。",
-					);
-					throw new Error(
-						"未配置视觉模型进行图像处理。",
-					);
-				}
-				// If a provider was already selected but it's not vision capable,
-				// and no specific vision provider is set, we might proceed without vision
-				// or throw an error depending on desired behavior. Here, we'll let it proceed
-				// and the provider itself might error out if it can't handle images.
-			}
-		} else {
-			// 如果没有图片，确保使用主模型（而不是上次可能使用的视觉模型）
-			const mainProvider = aiProviders.providers.find(
-				(p: IAIProvider) => p.id === this.settings.aiProviders.main,
-			);
-			if (mainProvider) {
-				provider = mainProvider;
-				// 更新模型显示名称为主模型
-				modelDisplayName = `${mainProvider.name}${
-					mainProvider.model ? ` (${mainProvider.model})` : ""
-				}`;
-			}
-		}
-
-		if (!provider) {
-			new Notice(
-				"未找到AI提供商。请在设置中配置提供商。",
-			);
-			throw new Error("未找到AI提供商");
-		}
-
-		// 检测模型能力并显示
-		const modelCapabilities = aiProviders.getModelCapabilities(provider);
-		console.log("模型能力:", modelCapabilities);
-
-		// --- 性能指标变量初始化 (Performance Metrics Variable Initialization) ---
-		const requestStartTime = performance.now(); // 请求开始时间 (Request start time)
-		let firstChunkTime: number | null = null; // 首个数据块到达时间 (Time when the first chunk arrives)
-		let tokensUsed: string | number = "N/A"; // 使用的 Token 数量，默认为 N/A (Number of tokens used, defaults to N/A)
-		// --- End of Performance Metrics Variable Initialization ---
-		
-		// 定义token使用和性能指标变量
-		let tokenData: {
-			inputTokens: number | string;
-			outputTokens: number | string;
-			totalTokens: number | string;
-			generationSpeed?: number | string;
-			promptEvalDuration?: number | string;
-			evalDuration?: number | string;
-			loadDuration?: number | string;
-			firstTokenLatency?: number;
-		} = {
-			inputTokens: "?",
-			outputTokens: "?",
-			totalTokens: "?"
-		};
-		
-		// 创建一个监听函数，用于捕获模型返回的完整元数据
-		// 此函数使用SDK提供的getLastRequestMetrics方法获取最近一次请求的性能指标
-		// 注意：此方法需要SDK版本≥1.4.0才能正常工作
-		const monitorOllamaData = async () => {
-			// 如果是Ollama提供商，尝试获取性能指标
-			if (provider && provider.type === 'ollama') {
-				// 等待一小段时间，确保请求已经完成
-				await new Promise(resolve => setTimeout(resolve, 100));
-				
-				try {
-					// 检查getLastRequestMetrics方法是否存在
-					if (aiProviders && typeof aiProviders.getLastRequestMetrics === 'function') {
-						console.log("找到getLastRequestMetrics方法，SDK版本兼容");
-						
-						// 直接使用IAIProvidersService接口调用getLastRequestMetrics方法
-						// 参数：providerId - 提供商ID，用于获取特定提供商的指标
-						// 返回：IUsageMetrics对象或null（如果没有记录任何请求）
-						const metrics = aiProviders.getLastRequestMetrics(provider.id);
-						
-						if (metrics) {
-							console.log("从SDK获取性能数据:", metrics);
-							
-							// 提取token数据，使用可选链操作符处理可能的undefined
-							tokenData.inputTokens = metrics.usage?.promptTokens || 0;
-							tokenData.outputTokens = metrics.usage?.completionTokens || 0;
-							tokenData.totalTokens = metrics.usage?.totalTokens || 0;
-							
-							// 提取性能指标数据，处理可能的undefined值
-							if (metrics.promptEvalDurationMs !== undefined) {
-								tokenData.promptEvalDuration = metrics.promptEvalDurationMs || 0;
-							}
-							
-							if (metrics.evalDurationMs !== undefined) {
-								tokenData.evalDuration = metrics.evalDurationMs || 0;
-							}
-							
-							if (metrics.loadDurationMs !== undefined) {
-								tokenData.loadDuration = metrics.loadDurationMs || 0;
-							}
-							
-							if (metrics.firstTokenLatencyMs !== undefined) {
-								tokenData.firstTokenLatency = metrics.firstTokenLatencyMs;
-							}
-							
-							// 计算生成速率（tokens/秒）
-							if (metrics.usage?.completionTokens && metrics.durationMs) {
-								tokenData.generationSpeed = Math.round((metrics.usage.completionTokens * 1000) / metrics.durationMs);
-							}
-							
-							console.log("成功处理性能指标:", tokenData);
-						} else {
-							console.log("SDK未返回性能指标数据，将使用智能估算");
-							// SDK未返回数据，将在后续使用智能估算
-						}
-					} else {
-						console.log("getLastRequestMetrics方法不存在，AI Providers插件版本可能低于1.4.0");
-						// 打印aiProviders对象的可用方法，用于调试
-						console.log("AI Providers可用方法:", Object.getOwnPropertyNames(aiProviders));
-					}
-				} catch (e) {
-					console.error("获取性能指标时出错:", e);
-					// 出错时会在后续使用智能估算器
-				}
-			}
-		};
-		
-		// 获取handler并执行请求
-		const executeParams: IAIProvidersExecuteParams = {
-			provider,
-			prompt: (await preparePrompt(
-				action.prompt, 
-				selectedText, 
-				context, 
-				this.app, 
-				this.app.workspace.getActiveFile(),
-				this.settings.tags.excludeFolders
-			)).prompt,
-			images: imagesInBase64,
-			systemPrompt: action.system ? 
-				(await preparePrompt(
-					action.system, 
-					"", 
-					"", 
-					this.app,
-					this.app.workspace.getActiveFile(),
-					this.settings.tags.excludeFolders
-				)).prompt : 
-				undefined,
-			options: {
-				temperature:
-					action.temperature ||
-					CREATIVITY[this.settings.defaults.creativity].temperature,
-			},
-		};
-		
-		// 提取用户在提示词中设置的显示控制参数
-		const promptOptions = await preparePrompt(
-			action.prompt, 
-			"", 
-			"", 
-			this.app,
-			this.app.workspace.getActiveFile(),
-			this.settings.tags.excludeFolders
-		);
-		const systemOptions = action.system ? 
-			await preparePrompt(
-				action.system, 
-				"", 
-				"", 
-				this.app,
-				this.app.workspace.getActiveFile(),
-				this.settings.tags.excludeFolders
-			) : 
-			{ showModelInfo: undefined, showPerformance: undefined };
-		
-		// 合并系统提示和用户提示中的控制参数
-		// 如果系统提示中明确指定了，则使用系统提示的设置，否则使用用户提示的设置
-		// 如果两者都没有明确指定，则使用全局默认设置
-		const showModelInfo = 
-			systemOptions.showModelInfo !== undefined ? systemOptions.showModelInfo : 
-			promptOptions.showModelInfo !== undefined ? promptOptions.showModelInfo : 
-			this.settings.defaults.showModelInfo;
-			
-		const showPerformance = 
-			systemOptions.showPerformance !== undefined ? systemOptions.showPerformance : 
-			promptOptions.showPerformance !== undefined ? promptOptions.showPerformance : 
-			this.settings.defaults.showPerformance;
-		
-		// 获取原始handler
-		const chunkHandler = await aiProviders.execute(executeParams);
-		
-		// 使用onData方法监听数据流
-		chunkHandler.onData((chunk: string, accumulatedText: string) => {
-			// --- TTFT捕获 (TTFT Capture) ---
-			if (firstChunkTime === null) {
-				firstChunkTime = performance.now(); // 记录首个数据块到达时间 (Record time of first chunk arrival)
-				tokenData.firstTokenLatency = Math.round(firstChunkTime - requestStartTime);
-				console.log("记录首字延迟:", tokenData.firstTokenLatency, "ms");
-			}
-			// --- End of TTFT Capture ---
-			onUpdate(accumulatedText);
+		// 发送请求开始事件
+		this.eventBus.emit(Events.AI_REQUEST_START, {
+			action: action.name,
+			provider: this.settings.aiProviders.main || 'unknown',
+			timestamp: Date.now()
 		});
-
-		chunkHandler.onEnd(async (fullText: string) => {
-			// 执行监控函数获取Ollama数据
-			await monitorOllamaData();
-			
-			hideSpinner && hideSpinner();
-			this.app.workspace.updateOptions();
-
-			// --- 总耗时与性能指标计算 (Total Time and Performance Metrics Calculation) ---
-			const requestEndTime = performance.now(); // 请求结束时间 (Request end time)
-			const totalTime = Math.round(requestEndTime - requestStartTime); // 总耗时 (Total time)
-			
-			// 首字延迟: 使用直接测量的时间
-			const ttft = tokenData.firstTokenLatency || 
-				(firstChunkTime ? Math.round(firstChunkTime - requestStartTime) : "N/A");
-			
-			// 检查实时数据是否可用，如果没有则使用智能估算
-			if (tokenData.totalTokens === "?") {
-				console.log("实时token数据不可用，使用智能估算");
-				const estimatedTokens = this.estimateTokenUsage(
-					(await preparePrompt(
-						action.prompt, 
-						selectedText, 
-						context, 
-						this.app, 
-						this.app.workspace.getActiveFile(),
-						this.settings.tags.excludeFolders
-					)).prompt, 
-					fullText, 
-					action.system ? 
-						(await preparePrompt(
-							action.system, 
-							"", 
-							"", 
-							this.app,
-							this.app.workspace.getActiveFile(),
-							this.settings.tags.excludeFolders
-						)).prompt : 
-						undefined
-				);
-				tokenData.inputTokens = estimatedTokens.inputTokens;
-				tokenData.outputTokens = estimatedTokens.outputTokens;
-				tokenData.totalTokens = estimatedTokens.totalTokens;
-			}
-			
-			// 如果没有生成速度数据，计算一个
-			if (!tokenData.generationSpeed && typeof tokenData.outputTokens === 'number' && totalTime > 0) {
-				tokenData.generationSpeed = Math.round((tokenData.outputTokens * 1000) / totalTime);
-			}
-			
-			// 移除思考标签并整理文本 (Remove thinking tags and trim the text)
-			const cleanedFullText = removeThinkingTags(fullText).trim();
-
-			// 构建最终输出文本，包括模型能力标签
-			const now = new Date();
-			const timeStr = now.toLocaleString("zh-CN", {
-				timeZone: "Asia/Shanghai",
-				hour12: false,
+		
+		const startTime = Date.now();
+		
+		try {
+			await this.actionExecutor.executeAction({
+				action,
+				editor
 			});
 			
-			// 生成模型能力图标
-			const capabilityIcons = this.getCapabilityIcons(modelCapabilities);
-			
-			// 根据控制参数决定是否显示模型信息
-			let finalText = showModelInfo 
-				? `[${modelDisplayName || "AI"} ${capabilityIcons} ${timeStr}]:\n---\n${cleanedFullText}`
-				: cleanedFullText;
-
-			// --- 格式化并附加性能指标 (Format and Append Performance Metrics) ---
-			if (showPerformance) {
-				let performanceMetrics = `\n\n---\n[Toks: ${tokenData.totalTokens} ↑${tokenData.inputTokens} ↓${tokenData.outputTokens} ${tokenData.generationSpeed || "?"}toks/s | 首字: ${ttft}ms | 总耗时: ${totalTime}ms`;
-				
-				// 如果是Ollama类型，添加Ollama特有的性能指标
-				if (provider?.type === 'ollama' && (tokenData.promptEvalDuration || tokenData.evalDuration || tokenData.loadDuration)) {
-					performanceMetrics += ` | `;
-					if (tokenData.promptEvalDuration) {
-						performanceMetrics += `提示词: ${tokenData.promptEvalDuration}ms | `;
-					}
-					if (tokenData.evalDuration) {
-						performanceMetrics += `生成: ${tokenData.evalDuration}ms | `;
-					}
-					if (tokenData.loadDuration) {
-						performanceMetrics += `加载: ${tokenData.loadDuration}ms | `;
-					}
-					// 去除最后的分隔符
-					performanceMetrics = performanceMetrics.replace(/\|\s*$/, '');
-				}
-				
-				performanceMetrics += `]:`;
-				finalText += performanceMetrics;
-			}
-			// --- End of Format and Append Performance Metrics ---
-
-			if (action.replace) {
-				// 如果动作用于替换选中文本 (If the action is to replace selected text)
-				editor.replaceRange(
-					finalText, // 插入带有模型名称的文本 (Insert text with model name)
-					cursorPositionFrom,
-					cursorPositionTo,
-				);
-			} else {
-				// 否则，在选中文本后插入 (Otherwise, insert after the selected text)
-				const isLastLine = editor.lastLine() === cursorPositionTo.line;
-				// 获取经过processText处理的格式化文本
-				const formattedText = this.processText(finalText, selectedText);
-				editor.replaceRange(
-					isLastLine ? "\n" + formattedText : formattedText,
-					{
-						ch: 0,
-						line: cursorPositionTo.line + 1,
-					},
-				);
-			}
-		});
-
-		chunkHandler.onError((error: Error) => {
-			console.log("abort handled");
-			if (!abortController.signal.aborted) {
-				new Notice(`生成文本时出错: ${error.message}`);
-			}
-			hideSpinner && hideSpinner();
-			this.app.workspace.updateOptions();
-			logger.separator();
-		});
-
-		abortController.signal.addEventListener("abort", () => {
-			console.log("make abort");
-			chunkHandler.abort();
-			hideSpinner && hideSpinner();
-			this.app.workspace.updateOptions();
-		});
+			// 发送请求完成事件
+			this.eventBus.emit(Events.AI_REQUEST_COMPLETE, {
+				action: action.name,
+				provider: this.settings.aiProviders.main || 'unknown',
+				duration: Date.now() - startTime,
+				success: true
+			});
+		} catch (error) {
+			// 错误由 ActionExecutor 内部处理
+			// 这里只发送完成事件
+			this.eventBus.emit(Events.AI_REQUEST_COMPLETE, {
+				action: action.name,
+				provider: this.settings.aiProviders.main || 'unknown',
+				duration: Date.now() - startTime,
+				success: false
+			});
+			throw error;
+		}
 	}
 
 	// 使用相关文档内容增强上下文
@@ -698,104 +384,51 @@ export default class LocalGPT extends Plugin {
 		aiProvider: IAIProvider | undefined,
 		abortController: AbortController,
 	): Promise<string> {
-		// 获取当前活动文件
 		const activeFile = this.app.workspace.getActiveFile();
-		if (!activeFile) {
-			return "";
-		}
-		if (!aiProvider) {
-			return "";
-		}
-
-		// 获取选中文本中提到的链接文件
-		const linkedFiles = getLinkedFiles(
-			selectedText,
-			this.app.vault,
-			this.app.metadataCache,
-			activeFile.path,
-		);
-
-		// 如果没有链接文件，返回空字符串
-		if (linkedFiles.length === 0) {
-			return "";
-		}
-
+		
+		// 发送文档处理开始事件
+		this.eventBus.emit(Events.DOCUMENT_PROCESS_START, {
+			fileCount: 1,
+			timestamp: Date.now()
+		});
+		
 		try {
-			// 检查是否已取消操作
-			if (abortController?.signal.aborted) {
-				return "";
-			}
-
-			// 初始化进度条
-			this.initializeProgress();
-
-			// 处理链接的文档
-			const processedDocs = await startProcessing(
-				linkedFiles,
-				this.app.vault,
-				this.app.metadataCache,
-				activeFile,
-			);
-
-			if (processedDocs.size === 0) {
-				this.hideStatusBar();
-				return "";
-			}
-
-			if (abortController?.signal.aborted) {
-				this.hideStatusBar();
-				return "";
-			}
-
-			// 创建向量存储以进行语义搜索
-			const vectorStore = await createVectorStore(
-				Array.from(processedDocs.values()),
-				this,
-				activeFile.path,
-				aiProvider as any,
-				aiProviders,
-				abortController,
-				this.addTotalProgressSteps.bind(this),
-				this.updateCompletedSteps.bind(this),
-			);
-
-			if (abortController?.signal.aborted) {
-				this.hideStatusBar();
-				return "";
-			}
-
-			// 查询向量存储获取相关上下文
-			const relevantContext = await queryVectorStore(
+			const result = await this.contextEnhancer.enhanceWithContext({
 				selectedText,
-				vectorStore,
-			);
-
-			this.hideStatusBar();
-
-			if (relevantContext.trim()) {
-				return relevantContext;
-			}
+				activeFile,
+				aiProviders,
+				aiProvider,
+				abortController
+			});
+			
+			// 发送文档处理完成事件
+			this.eventBus.emit(Events.DOCUMENT_PROCESS_COMPLETE, {
+				success: true,
+				resultLength: result.length
+			});
+			
+			return result;
 		} catch (error) {
-			this.hideStatusBar();
-			if (abortController?.signal.aborted) {
-				return "";
-			}
-
-			console.error("Error processing RAG:", error);
-			new Notice(
-				`Error processing related documents: ${error.message}. Continuing with original text.`,
-			);
+			// 发送文档处理完成事件（失败）
+			this.eventBus.emit(Events.DOCUMENT_PROCESS_COMPLETE, {
+				success: false,
+				error: error
+			});
+			throw error;
 		}
-
-		return "";
 	}
 
 	// 插件卸载时的清理工作
 	onunload() {
 		document.removeEventListener("keydown", this.escapeHandler); // 移除键盘监听
 		window.clearInterval(this.updatingInterval); // 清除更新检查定时器
-		if (this.animationFrameId !== null) {
-			cancelAnimationFrame(this.animationFrameId); // 取消动画帧
+		
+		// 清理架构组件
+		this.eventBus.clear();
+		this.container.clear();
+		
+		if (this.statusBarManager) {
+			this.statusBarManager.destroy(); // 清理状态栏管理器
 		}
 	}
 
@@ -1049,16 +682,21 @@ export default class LocalGPT extends Plugin {
 
 			// 如果有新版本可用，显示通知
 			if (response.tag_name !== this.manifest.version) {
-				new Notice(`⬆️ Local GPT: a new version is available`);
+				this.errorHandler.notify(`⬆️ Local GPT: 新版本 ${response.tag_name} 可用`, ErrorSeverity.INFO);
 			}
 		} catch (error) {
-			console.error("Error checking for updates:", error);
+			logger.error("检查更新失败:", error);
 		}
 	}
 
 	// ESC 键处理器：取消所有正在进行的 AI 请求
 	escapeHandler = (event: KeyboardEvent) => {
 		if (event.key === "Escape") {
+			// 发送中止事件
+			this.eventBus.emit(Events.AI_REQUEST_ABORT, {
+				timestamp: Date.now()
+			});
+			
 			this.abortControllers.forEach(
 				(abortControllers: AbortController) => {
 					abortControllers.abort();
@@ -1078,257 +716,61 @@ export default class LocalGPT extends Plugin {
 			10800000,
 		); // 每3小时检查更新
 		document.addEventListener("keydown", this.escapeHandler);
+		
+		// 发送设置变更事件
+		this.eventBus.emit(Events.SETTINGS_CHANGED, { settings: this.settings });
 	}
 
 	// 保存设置并重新加载插件
 	async saveSettings() {
 		await this.saveData(this.settings);
+		
+		// 更新容器中的设置
+		this.container.registerInstance(ServiceTokens.Settings, this.settings);
+		
 		this.reload();
 	}
 
-	// 初始化进度条显示
-	private initializeProgress() {
-		this.totalProgressSteps = 0;
-		this.completedProgressSteps = 0;
-		this.currentPercentage = 0;
-		this.targetPercentage = 0;
-		this.statusBarItem.show();
-		this.updateStatusBar();
+	// 初始化进度条显示 (改为公共方法以符合接口)
+	initializeProgress() {
+		this.statusBarManager.initializeProgress();
+		this.eventBus.emit(Events.PROGRESS_START);
 	}
 
-	// 添加总进度步数
-	private addTotalProgressSteps(steps: number) {
-		this.totalProgressSteps += steps;
-		this.updateProgressBar();
+	// 添加总进度步数 (改为公共方法以符合接口)
+	addTotalProgressSteps(steps: number) {
+		this.statusBarManager.addTotalProgressSteps(steps);
 	}
 
-	// 更新已完成的步数
-	private updateCompletedSteps(steps: number) {
-		this.completedProgressSteps += steps;
-		this.updateProgressBar();
+	// 更新已完成的步数 (改为公共方法以符合接口)
+	updateCompletedSteps(steps: number) {
+		this.statusBarManager.updateCompletedSteps(steps);
+		
+		// 发送进度更新事件
+		const progress = this.statusBarManager.getProgress();
+		this.eventBus.emit(Events.PROGRESS_UPDATE, {
+			current: progress.completed,
+			total: progress.total
+		});
 	}
 
-	// 更新进度条百分比
-	private updateProgressBar() {
-		const newTargetPercentage =
-			this.totalProgressSteps > 0
-				? Math.round(
-						(this.completedProgressSteps /
-							this.totalProgressSteps) *
-							100,
-					)
-				: 0;
-
-		if (this.targetPercentage !== newTargetPercentage) {
-			this.targetPercentage = newTargetPercentage;
-			if (this.animationFrameId === null) {
-				this.animatePercentage();
-			}
-		}
-	}
-
-	// 更新状态栏文本
-	private updateStatusBar() {
-		this.statusBarItem.setAttr(
-			"data-text",
-			this.currentPercentage
-				? `✨ Enhancing ${this.currentPercentage}%`
-				: "✨ Enhancing",
-		);
-		this.statusBarItem.setText(` `);
-	}
-
-	// 动画显示百分比变化
-	private animatePercentage() {
-		const startTime = performance.now();
-		const duration = 300; // 动画持续时间300ms
-
-		const animate = (currentTime: number) => {
-			const elapsedTime = currentTime - startTime;
-			const progress = Math.min(elapsedTime / duration, 1);
-
-			this.currentPercentage = Math.round(
-				this.currentPercentage +
-					(this.targetPercentage - this.currentPercentage) * progress,
-			);
-
-			this.updateStatusBar();
-
-			if (progress < 1) {
-				this.animationFrameId = requestAnimationFrame(animate);
-			} else {
-				this.animationFrameId = null;
-			}
-		};
-
-		this.animationFrameId = requestAnimationFrame(animate);
-	}
-
-	// 隐藏状态栏并重置进度
-	private hideStatusBar() {
-		this.statusBarItem.hide();
-		this.totalProgressSteps = 0;
-		this.completedProgressSteps = 0;
-		this.currentPercentage = 0;
-		this.targetPercentage = 0;
+	// 隐藏状态栏并重置进度 (改为公共方法以符合接口)
+	hideStatusBar() {
+		this.statusBarManager.hide();
+		this.eventBus.emit(Events.PROGRESS_COMPLETE);
 	}
 
 	// 智能 Token 估算器 (Smart Token Estimator)
-	private estimateTokens(text: string, isInput: boolean = false): number {
-		if (!text) return 0;
-		
-		// 基于经验的估算规则（改进中文处理）：
-		// - 英文：大约4个字符 = 1个token
-		// - 中文：每个字符约 0.7 个token
-		// - 代码：大约3.5个字符 = 1个token
-		// - Markdown 格式化文本：额外 10% 开销
-		
-		const chineseCharPattern = /[\u4e00-\u9fff]/g;
-		const codeBlockPattern = /```[\s\S]*?```/g;
-		const inlineCodePattern = /`[^`]+`/g;
-		const markdownPattern = /[*_~`#\[\]()]/g;
-		
-		const chineseChars = (text.match(chineseCharPattern) || []).length;
-		const codeBlocks = (text.match(codeBlockPattern) || []).join('');
-		const inlineCode = (text.match(inlineCodePattern) || []).join('');
-		const markdownChars = (text.match(markdownPattern) || []).length;
-		
-		// 移除代码块和行内代码来计算普通文本
-		const textWithoutCode = text
-			.replace(codeBlockPattern, '')
-			.replace(inlineCodePattern, '');
-		
-		const englishChars = textWithoutCode.length - chineseChars;
-		
-		// 计算不同类型文本的 token
-		const chineseTokens = Math.ceil(chineseChars * 0.7); // 改进的中文token估算
-		const englishTokens = Math.ceil(englishChars * 0.25); // 4字符/token
-		const codeTokens = Math.ceil((codeBlocks.length + inlineCode.length) * 0.285); // 3.5字符/token
-		const markdownTokens = Math.ceil(markdownChars * 0.1); // 格式化标记的额外开销
-		
-		// Ollama模型通常需要更多token，直接使用调整系数
-		const modelAdjustment = 1.2; // 适当增加估算值以更接近Ollama实际值
-		
-		const totalTokens = Math.ceil((chineseTokens + englishTokens + codeTokens + markdownTokens) * modelAdjustment);
-		
-		// 为输入文本添加系统提示的估算开销
-		if (isInput) {
-			return Math.max(totalTokens + 60, 15); // 最少15个token，包含系统提示开销
-		}
-		
-		return Math.max(totalTokens, 1); // 最少1个token
-	}
+	// 此方法已移至 utils/tokenUtils.ts
 
 	// 估算输入输出 tokens (Estimate input/output tokens)
-	private estimateTokenUsage(inputText: string, outputText: string, systemPrompt?: string): {
-		inputTokens: number;
-		outputTokens: number;
-		totalTokens: number;
-	} {
-		const systemTokens = systemPrompt ? this.estimateTokens(systemPrompt, true) : 0;
-		const inputTokens = this.estimateTokens(inputText, true) + systemTokens;
-		const outputTokens = this.estimateTokens(outputText, false);
-		const totalTokens = inputTokens + outputTokens;
-		
-		return { inputTokens, outputTokens, totalTokens };
-	}
+	// 此方法已移至 utils/tokenUtils.ts
 
 	// 智能视觉模型判断器 (Smart Vision Model Detector)
-	public isVisionCapableModel(provider: IAIProvider): boolean {
-		const providerWithCapabilities = provider as any;
-		
-		// 1. 首先检查 capabilities.vision 属性（最可靠）
-		if (providerWithCapabilities.capabilities?.vision) {
-			return true;
-		}
-		
-		// 2. 基于准确的模型名称匹配
-		const modelName = provider.model?.toLowerCase() || "";
-		const providerName = provider.name.toLowerCase();
-		
-		// OpenAI 视觉模型
-		const openaiVisionModels = [
-			"gpt-4-vision-preview",
-			"gpt-4o",
-			"gpt-4o-mini", 
-			"gpt-4o-2024-05-13",
-			"gpt-4o-2024-08-06",
-			"gpt-4-turbo-vision"
-		];
-		
-		// Anthropic 视觉模型 (Claude 3系列)
-		const anthropicVisionModels = [
-			"claude-3-opus",
-			"claude-3-sonnet", 
-			"claude-3-haiku",
-			"claude-3.5-sonnet",
-			"claude-3-5-sonnet"
-		];
-		
-		// Google 视觉模型
-		const googleVisionModels = [
-			"gemini-pro-vision",
-			"gemini-1.5-pro",
-			"gemini-1.5-flash",
-			"gemini-2.0-flash"
-		];
-		
-		// 其他已知视觉模型
-		const otherVisionModels = [
-			"llava",
-			"llava-llama3", 
-			"llava-phi3",
-			"moondream",
-			"bakllava",
-			"cogvlm"
-		];
-		
-		// 检查精确匹配
-		const allVisionModels = [
-			...openaiVisionModels,
-			...anthropicVisionModels, 
-			...googleVisionModels,
-			...otherVisionModels
-		];
-		
-		for (const visionModel of allVisionModels) {
-			if (modelName.includes(visionModel)) {
-				return true;
-			}
-		}
-		
-		// 3. 检查名称中包含 "vision" 的模型
-		if (modelName.includes("vision") || providerName.includes("vision")) {
-			return true;
-		}
-		
-		// 4. 特殊情况：一些provider可能在名称中标注了视觉能力
-		const visionKeywords = ["visual", "multimodal", "mm", "vlm"];
-		for (const keyword of visionKeywords) {
-			if (modelName.includes(keyword) || providerName.includes(keyword)) {
-				return true;
-			}
-		}
-		
-		return false;
-	}
+	// 此方法已移至 utils/modelUtils.ts
 
 	// 根据模型能力生成图标
-	private getCapabilityIcons(capabilities: AICapability[]): string {
-		const iconMap: Record<AICapability, string> = {
-			'dialogue': '💬',
-			'vision': '👁️',
-			'tool_use': '🔧',
-			'text_to_image': '🖼️',
-			'embedding': '🔍'
-		};
-		
-		if (!capabilities || capabilities.length === 0) {
-			return '';
-		}
-		
-		return capabilities.map(cap => iconMap[cap] || '').join(' ');
-	}
+	// 此方法已移至 utils/modelUtils.ts
 
 	// 刷新标签缓存
 	async refreshTagCache(forceRefresh: boolean = true) {
@@ -1343,291 +785,5 @@ export default class LocalGPT extends Plugin {
 		} else {
 			clearTagCache();
 		}
-	}
-}
-
-// 用于 "::" 触发的动作建议器 (Action Suggestor for "::" trigger)
-class ActionSuggestor extends EditorSuggest<LocalGPTAction> {
-	private plugin: LocalGPT; // LocalGPT 插件实例引用 (Reference to the LocalGPT plugin instance)
-
-	constructor(plugin: LocalGPT) {
-		super(plugin.app); // 将 App 实例传递给 EditorSuggest 构造函数 (Pass App instance to EditorSuggest constructor)
-		this.plugin = plugin; // 初始化动作建议器，传入 LocalGPT 插件实例
-		// 构造函数，初始化父类 EditorSuggest 并设置插件实例 (Constructor, initializes parent EditorSuggest and sets plugin instance)
-	}
-
-	// 当用户输入特定字符序列 (例如 "：") 时触发 (Triggered when the user types a specific character sequence, e.g., "：")
-	onTrigger(
-		cursor: EditorPosition, // 当前光标位置 (Current cursor position)
-		editor: Editor, // 当前编辑器实例 (Current editor instance)
-		_file: TFile | null, // 当前打开的文件 (Currently open file, may be null)
-	): EditorSuggestTriggerInfo | null {
-		// 返回触发信息或 null (Returns trigger info or null)
-		const line = editor.getLine(cursor.line); // 获取当前行内容 (Get current line content)
-		const sub = line.substring(0, cursor.ch); // 获取光标前的子字符串 (Get substring before the cursor)
-
-		// 检查是否输入了中文冒号 "：" (Check if Chinese colon "：" is typed)
-		const match = sub.match(/：([^：]*)$/); // 匹配中文冒号及其后面的文本
-		if (match) {
-			return {
-				start: { line: cursor.line, ch: match.index! }, // 建议开始的位置 (Start position for the suggestion)
-				end: cursor, // 建议结束的位置 (End position for the suggestion)
-				query: match[1] || "", // "：" 后面的查询字符串，用于过滤功能 (Query string after "：" for filtering)
-			};
-		}
-		return null; // 没有匹配则不触发建议 (No match, so don't trigger suggestions)
-	}
-
-	// 获取建议列表 (Get the list of suggestions)
-	getSuggestions(
-		context: EditorSuggestContext, // 编辑器建议上下文 (Editor suggest context)
-	): LocalGPTAction[] {
-		// 返回一个 LocalGPTAction 数组 (Returns an array of LocalGPTAction)
-		const allActions = this.plugin.settings.actions;
-		const query = context.query.toLowerCase();
-
-		// 如果有查询字符串，进行模糊匹配过滤 (If there's a query string, filter by fuzzy matching)
-		if (query) {
-			return allActions.filter((action) =>
-				action.name.toLowerCase().includes(query),
-			);
-		}
-
-		// 否则返回所有动作 (Otherwise return all actions)
-		return allActions;
-	}
-
-	// 渲染每个建议项 (Render each suggestion item)
-	renderSuggestion(action: LocalGPTAction, el: HTMLElement): void {
-		// 设置建议项的显示文本为动作名称 (Set the display text for the suggestion item to the action name)
-		el.setText(action.name);
-	}
-
-	// 当用户选择一个建议项时调用 (Called when the user selects a suggestion item)
-	selectSuggestion(
-		action: LocalGPTAction,
-		evt: MouseEvent | KeyboardEvent,
-	): void {
-		const currentEditor = this.plugin.app.workspace.activeEditor?.editor;
-		if (!currentEditor) {
-			new Notice("Cannot find active editor to run action."); // 提示用户找不到编辑器 (Notify user editor not found)
-			this.close(); // 关闭建议器 (Close the suggester)
-			return;
-		}
-		// 执行选择的动作 (Execute the selected action)
-		this.plugin.runAction(action, currentEditor);
-		// 提示用户动作已执行 (Notify the user that the action has been executed)
-		// new Notice(`Running action: ${action.name}`); // runAction 内部已有 Notice，此处可省略 (Notice already in runAction, can be omitted here)
-		this.close(); // 显式关闭建议器 (Explicitly close the suggester)
-
-		// 切换默认动作
-		this.plugin.settings.defaults.defaultAction = action.name;
-		this.plugin.saveSettings();
-	}
-}
-
-// 用于模型选择的建议器 (Model Suggestor)
-class ModelSuggestor extends EditorSuggest<IAIProvider> {
-	private plugin: LocalGPT; // LocalGPT 插件实例引用 (Reference to the LocalGPT plugin instance)
-	private aiProvidersService: IAIProvidersService | null = null; // AI Providers 服务实例 (AI Providers service instance)
-
-	constructor(plugin: LocalGPT) {
-		super(plugin.app); // 将 App 实例传递给 EditorSuggest 构造函数 (Pass App instance to EditorSuggest constructor)
-		this.plugin = plugin; // 初始化模型建议器，传入 LocalGPT 插件实例
-		// 构造函数，初始化父类 EditorSuggest 并设置插件实例 (Constructor, initializes parent EditorSuggest and sets plugin instance)
-		this.loadProviders(); // 异步加载 AI Providers (Asynchronously load AI Providers)
-	}
-
-	// 异步加载 AI Providers 服务 (Asynchronously loads the AI Providers service)
-	private async loadProviders() {
-		try {
-			const aiRequestWaiter = await waitForAI(); // 等待 AI 服务初始化 (Wait for AI service initialization)
-			this.aiProvidersService = await aiRequestWaiter.promise; // 获取 AI Providers 服务实例 (Get the AI Providers service instance)
-		} catch (error) {
-			console.error(
-				"Error loading AI providers for ModelSuggestor:",
-				error,
-			);
-			new Notice(
-				"Failed to load AI providers for model suggestion. Model selection via '@' might not work.",
-			);
-		}
-	}
-
-	// 当用户输入特定字符 (例如 "@") 时触发 (Triggered when the user types a specific character, e.g., "@")
-	onTrigger(
-		cursor: EditorPosition, // 当前光标位置 (Current cursor position)
-		editor: Editor, // 当前编辑器实例 (Current editor instance)
-		_file: TFile | null, // 当前打开的文件 (Currently open file, may be null)
-	): EditorSuggestTriggerInfo | null {
-		// 返回触发信息或 null (Returns trigger info or null)
-		const line = editor.getLine(cursor.line); // 获取当前行内容 (Get current line content)
-		const sub = line.substring(0, cursor.ch); // 获取光标前的子字符串 (Get substring before the cursor)
-		const match = sub.match(/@([\w\s]*)$/); // 检查 "@" 符号后跟任意单词字符或空格 (Check for "@" symbol followed by any word characters or spaces)
-
-		if (match) {
-			return {
-				start: { line: cursor.line, ch: match.index! }, // 建议开始的位置 (Start position for the suggestion)
-				end: cursor, // 建议结束的位置 (End position for the suggestion)
-				query: match[1], // "@" 后面的查询字符串 (Query string after "@")
-			};
-		}
-		return null; // 没有匹配则不触发建议 (No match, so don't trigger suggestions)
-	}
-
-	// 获取建议列表 (Get the list of suggestions)
-	getSuggestions(
-		context: EditorSuggestContext, // 编辑器建议上下文 (Editor suggest context)
-	): IAIProvider[] {
-		// 返回一个 IAIProvider 数组 (Returns an array of IAIProvider)
-		if (!this.aiProvidersService) {
-			// 如果 AI Provider 服务未加载，则不显示建议 (If AI Provider service is not loaded, show no suggestions)
-			// A notice is already shown in loadProviders
-			return [];
-		}
-
-		const providers = this.aiProvidersService.providers; // 获取所有可用的 AI Provider (Get all available AI Providers)
-		const query = context.query.toLowerCase(); // 获取用户输入的查询条件并转为小写 (Get user's query and convert to lowercase)
-
-		// 计算匹配分数的函数
-		const getMatchScore = (provider: IAIProvider): number => {
-			if (!query) return 0;
-
-			const name = provider.name.toLowerCase();
-			const model = provider.model?.toLowerCase() || "";
-
-			// 完全匹配得分最高
-			if (name === query || model === query) return 100;
-
-			// 开头匹配得分次之
-			if (name.startsWith(query) || model.startsWith(query)) return 80;
-
-			// 包含匹配得分较低
-			if (name.includes(query) || model.includes(query)) return 50;
-
-			return 0;
-		};
-
-		// 过滤并评分所有模型
-		const filteredProviders: IAIProvider[] = [];
-		let bestMatch: IAIProvider | null = null;
-		let highestScore = 0;
-
-		providers.forEach((provider) => {
-			// 计算匹配分数
-			const score = getMatchScore(provider);
-
-			// 更新最佳匹配
-			if (score > highestScore) {
-				highestScore = score;
-				bestMatch = provider;
-			}
-
-			// 根据查询过滤
-			const matchesQuery = score > 0 || !query;
-
-			if (matchesQuery) {
-				filteredProviders.push(provider);
-			}
-		});
-
-		// 排序：最佳匹配放在第一位，其余按名称排序
-		const sortedProviders = [...filteredProviders];
-		
-		if (bestMatch && query && highestScore > 0) {
-			// 移除最佳匹配项，然后将其放在第一位
-			const bestMatchIndex = sortedProviders.findIndex(p => p.id === bestMatch!.id);
-			if (bestMatchIndex > -1) {
-				sortedProviders.splice(bestMatchIndex, 1);
-			}
-			
-			// 剩余项按名称排序
-			sortedProviders.sort((a, b) => a.name.localeCompare(b.name));
-			
-			// 最佳匹配放在第一位
-			sortedProviders.unshift(bestMatch);
-		} else {
-			// 没有查询时，简单按名称排序
-			sortedProviders.sort((a, b) => a.name.localeCompare(b.name));
-		}
-
-		return sortedProviders;
-	}
-
-	// 渲染每个建议项 (Render each suggestion item)
-	renderSuggestion(suggestion: IAIProvider, el: HTMLElement): void {
-		// 使用智能视觉模型判断器确定模型类型
-		const isVisionModel = this.plugin.isVisionCapableModel(suggestion);
-		
-		// 根据模型类型选择图标
-		const modelTypeIcon = isVisionModel ? "👁️" : "💬";
-		
-		// 设置建议项的显示文本 (Set the display text for the suggestion item)
-		// 格式: "Provider Name (model name) 图标" 
-		// Format: "Provider Name (model name) icon"
-		const baseText = `${suggestion.name} (${
-			suggestion.model || "Default"
-		})`;
-		
-		const displayText = `${baseText} ${modelTypeIcon}`;
-		el.setText(displayText);
-
-		// 为当前选中的模型添加标记
-		const currentMainId = this.plugin.settings.aiProviders.main;
-		const currentVisionId = this.plugin.settings.aiProviders.vision;
-
-		if (
-			suggestion.id === currentMainId ||
-			suggestion.id === currentVisionId
-		) {
-			el.setText(displayText + " ✓");
-			el.style.fontWeight = "bold";
-		}
-	}
-
-	// 当用户选择一个建议项时调用 (Called when the user selects a suggestion item)
-	selectSuggestion(
-		suggestion: IAIProvider,
-		evt: MouseEvent | KeyboardEvent,
-	): void {
-		// 获取当前编辑器
-		const editor = this.plugin.app.workspace.activeEditor?.editor;
-		if (!editor) {
-			new Notice("无法找到活动编辑器");
-			this.close();
-			return;
-		}
-
-		// 获取触发信息用于替换文本
-		if (this.context) {
-			// 构建替换文本：@模型名称
-			const modelName = suggestion.model || suggestion.name;
-			const replacementText = `@${modelName} `;
-
-			// 替换编辑器中的文本
-			editor.replaceRange(
-				replacementText,
-				this.context.start,
-				this.context.end,
-			);
-		}
-
-		// 使用智能视觉模型判断器
-		const isVisionModel = this.plugin.isVisionCapableModel(suggestion);
-
-		// 更新对应的全局配置
-		if (isVisionModel) {
-			// 更新视觉模型配置
-			this.plugin.settings.aiProviders.vision = suggestion.id;
-			new Notice(`已切换视觉模型为: ${suggestion.name}`);
-		} else {
-			// 更新主模型配置
-			this.plugin.settings.aiProviders.main = suggestion.id;
-			new Notice(`已切换主模型为: ${suggestion.name}`);
-		}
-
-		// 保存设置
-		this.plugin.saveSettings();
-		this.close(); // 关闭建议器
 	}
 }
